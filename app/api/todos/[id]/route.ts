@@ -51,6 +51,7 @@ export async function PUT(request: NextRequest, { params }: { params: Params }) 
     priority?: unknown;
     is_recurring?: unknown;
     recurrence_pattern?: unknown;
+    reminder_minutes?: unknown;
   };
   try {
     body = await request.json();
@@ -104,6 +105,7 @@ export async function PUT(request: NextRequest, { params }: { params: Params }) 
     priority?: Priority;
     is_recurring?: boolean;
     recurrence_pattern?: RecurrencePattern | null;
+    reminder_minutes?: number | null;
   } = {};
 
   if (body.title !== undefined) input.title = String(body.title).trim();
@@ -132,6 +134,18 @@ export async function PUT(request: NextRequest, { params }: { params: Params }) 
     }
     input.recurrence_pattern =
       body.recurrence_pattern === null ? null : (body.recurrence_pattern as RecurrencePattern);
+  }
+  if (body.reminder_minutes !== undefined) {
+    if (body.reminder_minutes === null || body.reminder_minutes === '') {
+      input.reminder_minutes = null;
+    } else {
+      const VALID_REMINDER_VALUES = [15, 30, 60, 120, 1440, 2880, 10080];
+      const rm = Number(body.reminder_minutes);
+      if (!VALID_REMINDER_VALUES.includes(rm)) {
+        return NextResponse.json({ error: 'Invalid reminder_minutes value' }, { status: 400 });
+      }
+      input.reminder_minutes = rm;
+    }
   }
 
   // Validate recurrence consistency
@@ -166,6 +180,7 @@ export async function PUT(request: NextRequest, { params }: { params: Params }) 
       due_date: nextDueDate,
       is_recurring: true,
       recurrence_pattern: updated.recurrence_pattern,
+      reminder_minutes: updated.reminder_minutes ?? null,
     });
   }
 

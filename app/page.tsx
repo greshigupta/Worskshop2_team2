@@ -1,6 +1,7 @@
 'use client';
 
 import { useState, useEffect, useCallback } from 'react';
+import { useNotifications } from '@/lib/hooks/useNotifications';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -19,6 +20,8 @@ interface Todo {
   priority: Priority;
   is_recurring: boolean;
   recurrence_pattern: RecurrencePattern | null;
+  reminder_minutes: number | null;
+  last_notification_sent: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -30,6 +33,7 @@ interface FormState {
   priority: Priority;
   is_recurring: boolean;
   recurrence_pattern: RecurrencePattern;
+  reminder_minutes: number | null;
 }
 
 const EMPTY_FORM: FormState = {
@@ -39,11 +43,23 @@ const EMPTY_FORM: FormState = {
   priority: 'medium',
   is_recurring: false,
   recurrence_pattern: 'daily',
+  reminder_minutes: null,
 };
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+const REMINDER_OPTIONS = [
+  { label: 'No reminder', value: null },
+  { label: '15 minutes before', value: 15 },
+  { label: '30 minutes before', value: 30 },
+  { label: '1 hour before',     value: 60 },
+  { label: '2 hours before',    value: 120 },
+  { label: '1 day before',      value: 1440 },
+  { label: '2 days before',     value: 2880 },
+  { label: '1 week before',     value: 10080 },
+];
 
 const PRIORITY_WEIGHT: Record<Priority, number> = { high: 0, medium: 1, low: 2 };
 
@@ -109,6 +125,16 @@ export default function HomePage() {
 
   // Priority filter
   const [priorityFilter, setPriorityFilter] = useState<Priority | 'all'>('all');
+
+  // Notifications
+  const { permission, supported, requestPermission, startPolling } = useNotifications();
+
+  useEffect(() => {
+    if (supported && permission === 'granted') {
+      const id = startPolling();
+      return () => clearInterval(id);
+    }
+  }, [supported, permission]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // ---------------------------------------------------------------------------
   // Auth bootstrap (dev-login for local development)
@@ -192,6 +218,7 @@ export default function HomePage() {
       priority: todo.priority,
       is_recurring: todo.is_recurring,
       recurrence_pattern: todo.recurrence_pattern ?? 'daily',
+      reminder_minutes: todo.reminder_minutes,
     });
     setFormError(null);
     setShowModal(true);
@@ -236,6 +263,7 @@ export default function HomePage() {
       priority: form.priority,
       is_recurring: form.is_recurring,
       recurrence_pattern: form.is_recurring ? form.recurrence_pattern : null,
+      reminder_minutes: form.due_date ? form.reminder_minutes : null,
     };
 
     setSubmitting(true);
@@ -291,6 +319,8 @@ export default function HomePage() {
         priority: form.priority,
         is_recurring: form.is_recurring,
         recurrence_pattern: form.is_recurring ? form.recurrence_pattern : null,
+        reminder_minutes: form.due_date ? form.reminder_minutes : null,
+        last_notification_sent: null,
         created_at: new Date().toISOString(),
         updated_at: new Date().toISOString(),
       };
@@ -420,6 +450,11 @@ export default function HomePage() {
               🔄 {todo.recurrence_pattern}
             </p>
           )}
+          {todo.reminder_minutes !== null && todo.reminder_minutes !== undefined && (
+            <p className="text-xs text-gray-400 mt-0.5">
+              🔔 {REMINDER_OPTIONS.find(o => o.value === todo.reminder_minutes)?.label ?? `${todo.reminder_minutes}m before`}
+            </p>
+          )}
         </div>
 
         <div className="flex gap-1 flex-shrink-0">
@@ -527,6 +562,14 @@ export default function HomePage() {
               ✕
             </button>
           </span>
+        )}
+        {supported && permission !== 'granted' && (
+          <button
+            onClick={requestPermission}
+            className="flex items-center gap-1 px-3 py-1.5 bg-yellow-50 border border-yellow-300 text-yellow-800 text-xs rounded-lg hover:bg-yellow-100 transition-colors"
+          >
+            🔔 Enable Notifications
+          </button>
         )}
       </div>
 
@@ -681,6 +724,25 @@ export default function HomePage() {
                     )}
                   </div>
                 )}
+              </div>
+
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">
+                  Reminder
+                </label>
+                <select
+                  value={form.reminder_minutes ?? ''}
+                  onChange={(e) => setForm((f) => ({ ...f, reminder_minutes: e.target.value ? Number(e.target.value) : null }))}
+                  disabled={!form.due_date}
+                  title={!form.due_date ? 'Set a due date to enable reminders' : undefined}
+                  className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 bg-white disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                  {REMINDER_OPTIONS.map((opt) => (
+                    <option key={opt.label} value={opt.value ?? ''}>
+                      {opt.label}
+                    </option>
+                  ))}
+                </select>
               </div>
 
               <div className="flex gap-3 pt-1">

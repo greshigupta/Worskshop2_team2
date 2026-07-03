@@ -24,7 +24,7 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ error: 'Not authenticated' }, { status: 401 });
   }
 
-  let body: { title?: unknown; description?: unknown; due_date?: unknown; priority?: unknown; is_recurring?: unknown; recurrence_pattern?: unknown };
+  let body: { title?: unknown; description?: unknown; due_date?: unknown; priority?: unknown; is_recurring?: unknown; recurrence_pattern?: unknown; reminder_minutes?: unknown };
   try {
     body = await request.json();
   } catch {
@@ -92,6 +92,20 @@ export async function POST(request: NextRequest) {
     recurrence_pattern = body.recurrence_pattern as RecurrencePattern;
   }
 
-  const todo = todoDB.create(session.userId, { title, description, due_date, priority, is_recurring, recurrence_pattern });
+  // Validate reminder_minutes
+  let reminder_minutes: number | null = null;
+  if (body.reminder_minutes !== undefined && body.reminder_minutes !== null && body.reminder_minutes !== '') {
+    const rm = Number(body.reminder_minutes);
+    const VALID_REMINDER_VALUES = [15, 30, 60, 120, 1440, 2880, 10080];
+    if (!VALID_REMINDER_VALUES.includes(rm)) {
+      return NextResponse.json({ error: 'Invalid reminder_minutes value' }, { status: 400 });
+    }
+    if (!due_date) {
+      return NextResponse.json({ error: 'Reminder requires a due date' }, { status: 400 });
+    }
+    reminder_minutes = rm;
+  }
+
+  const todo = todoDB.create(session.userId, { title, description, due_date, priority, is_recurring, recurrence_pattern, reminder_minutes });
   return NextResponse.json(todo, { status: 201 });
 }

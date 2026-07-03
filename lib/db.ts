@@ -58,6 +58,18 @@ try {
   // Column already exists — ignore
 }
 
+// Migration: add reminder columns (safe to run multiple times)
+try {
+  db.exec(`ALTER TABLE todos ADD COLUMN reminder_minutes INTEGER`);
+} catch {
+  // Column already exists — ignore
+}
+try {
+  db.exec(`ALTER TABLE todos ADD COLUMN last_notification_sent TEXT`);
+} catch {
+  // Column already exists — ignore
+}
+
 // ---------------------------------------------------------------------------
 // TypeScript interfaces
 // ---------------------------------------------------------------------------
@@ -75,6 +87,8 @@ export interface Todo {
   priority: Priority;
   is_recurring: boolean;
   recurrence_pattern: RecurrencePattern | null;
+  reminder_minutes: number | null;
+  last_notification_sent: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -86,6 +100,7 @@ export interface CreateTodoInput {
   priority?: Priority;
   is_recurring?: boolean;
   recurrence_pattern?: RecurrencePattern | null;
+  reminder_minutes?: number | null;
 }
 
 export interface UpdateTodoInput {
@@ -96,6 +111,7 @@ export interface UpdateTodoInput {
   priority?: Priority;
   is_recurring?: boolean;
   recurrence_pattern?: RecurrencePattern | null;
+  reminder_minutes?: number | null;
 }
 
 // Raw row returned by better-sqlite3 (completed stored as 0/1)
@@ -109,6 +125,8 @@ interface TodoRow {
   priority: string;
   is_recurring: number;
   recurrence_pattern: string | null;
+  reminder_minutes: number | null;
+  last_notification_sent: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -120,6 +138,8 @@ function rowToTodo(row: TodoRow): Todo {
     priority: (row.priority as Priority) ?? 'medium',
     is_recurring: row.is_recurring === 1,
     recurrence_pattern: (row.recurrence_pattern as RecurrencePattern | null) ?? null,
+    reminder_minutes: row.reminder_minutes ?? null,
+    last_notification_sent: row.last_notification_sent ?? null,
   };
 }
 
@@ -128,9 +148,9 @@ function rowToTodo(row: TodoRow): Todo {
 // ---------------------------------------------------------------------------
 
 const stmts = {
-  insert: db.prepare<[number, string, string | null, string | null, string, number, string | null, string, string]>(`
-    INSERT INTO todos (user_id, title, description, due_date, priority, is_recurring, recurrence_pattern, created_at, updated_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+  insert: db.prepare<[number, string, string | null, string | null, string, number, string | null, number | null, string, string]>(`
+    INSERT INTO todos (user_id, title, description, due_date, priority, is_recurring, recurrence_pattern, reminder_minutes, created_at, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `),
   selectAll: db.prepare<[number]>(`
     SELECT * FROM todos WHERE user_id = ? ORDER BY created_at DESC
@@ -138,10 +158,10 @@ const stmts = {
   selectById: db.prepare<[number, number]>(`
     SELECT * FROM todos WHERE id = ? AND user_id = ?
   `),
-  updateFull: db.prepare<[string, string | null, number, string | null, string, number, string | null, string, number, number]>(`
+  updateFull: db.prepare<[string, string | null, number, string | null, string, number, string | null, number | null, string, number, number]>(`
     UPDATE todos
     SET title = ?, description = ?, completed = ?, due_date = ?, priority = ?,
-        is_recurring = ?, recurrence_pattern = ?, updated_at = ?
+        is_recurring = ?, recurrence_pattern = ?, reminder_minutes = ?, updated_at = ?
     WHERE id = ? AND user_id = ?
   `),
   delete: db.prepare<[number, number]>(`
@@ -159,6 +179,7 @@ export const todoDB = {
     const priority: Priority = input.priority ?? 'medium';
     const is_recurring = input.is_recurring ? 1 : 0;
     const recurrence_pattern = input.recurrence_pattern ?? null;
+    const reminder_minutes = input.reminder_minutes ?? null;
     const result = stmts.insert.run(
       userId,
       input.title.trim(),
@@ -167,6 +188,7 @@ export const todoDB = {
       priority,
       is_recurring,
       recurrence_pattern,
+      reminder_minutes,
       now,
       now,
     );
@@ -199,8 +221,16 @@ export const todoDB = {
     const is_recurring = input.is_recurring !== undefined ? (input.is_recurring ? 1 : 0) : (existing.is_recurring ? 1 : 0);
     const recurrence_pattern =
       input.recurrence_pattern !== undefined ? (input.recurrence_pattern ?? null) : existing.recurrence_pattern;
+    // Clear reminder if due_date is being removed
+    const effective_due_date = input.due_date !== undefined ? (input.due_date ?? null) : (existing.due_date ?? null);
+    const reminder_minutes =
+      input.reminder_minutes !== undefined
+        ? (input.reminder_minutes ?? null)
+        : effective_due_date === null
+          ? null
+          : (existing.reminder_minutes ?? null);
 
-    stmts.updateFull.run(title, description, completed, due_date, priority, is_recurring, recurrence_pattern, now, id, userId);
+    stmts.updateFull.run(title, description, completed, due_date, priority, is_recurring, recurrence_pattern, reminder_minutes, now, id, userId);
     return rowToTodo(stmts.selectById.get(id, userId) as TodoRow);
   },
 
@@ -244,5 +274,35 @@ export const userDB = {
   findByUsername(username: string): User | null {
     const row = userStmts.selectByUsername.get(username) as UserRow | undefined;
     return row ?? null;
+  },
+};
+
+// ---------------------------------------------------------------------------
+// notificationDB — reminder / notification helpers
+// ---------------------------------------------------------------------------
+
+const notifStmts = {
+  getTodosNeedingNotification: db.prepare<[number, string, string]>(`
+    SELECT * FROM todos
+    WHERE user_id = ?
+      AND completed = 0
+      AND reminder_minutes IS NOT NULL
+      AND due_date IS NOT NULL
+      AND datetime(due_date, '-' || reminder_minutes || ' minutes') <= ?
+      AND (last_notification_sent IS NULL
+           OR datetime(last_notification_sent, '+' || reminder_minutes || ' minutes') <= ?)
+  `),
+  markNotificationSent: db.prepare<[string, number]>(`
+    UPDATE todos SET last_notification_sent = ? WHERE id = ?
+  `),
+};
+
+export const notificationDB = {
+  getTodosNeedingNotification(userId: number, nowIso: string): Todo[] {
+    const rows = notifStmts.getTodosNeedingNotification.all(userId, nowIso, nowIso) as TodoRow[];
+    return rows.map(rowToTodo);
+  },
+  markNotificationSent(todoId: number, sentAt: string): void {
+    notifStmts.markNotificationSent.run(sentAt, todoId);
   },
 };
