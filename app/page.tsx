@@ -24,6 +24,16 @@ interface Todo {
   last_notification_sent: string | null;
   created_at: string;
   updated_at: string;
+  subtasks: Subtask[];
+}
+
+interface Subtask {
+  id: number;
+  todo_id: number;
+  title: string;
+  completed: boolean;
+  position: number;
+  created_at: string;
 }
 
 interface FormState {
@@ -125,6 +135,18 @@ export default function HomePage() {
 
   // Priority filter
   const [priorityFilter, setPriorityFilter] = useState<Priority | 'all'>('all');
+
+  // Expanded subtask sections (Set of todo IDs)
+  const [expandedSubtasks, setExpandedSubtasks] = useState<Set<number>>(new Set());
+
+  function toggleSubtaskSection(todoId: number) {
+    setExpandedSubtasks((prev) => {
+      const next = new Set(prev);
+      if (next.has(todoId)) next.delete(todoId);
+      else next.add(todoId);
+      return next;
+    });
+  }
 
   // Notifications
   const { permission, supported, requestPermission, startPolling } = useNotifications();
@@ -321,6 +343,7 @@ export default function HomePage() {
         recurrence_pattern: form.is_recurring ? form.recurrence_pattern : null,
         reminder_minutes: form.due_date ? form.reminder_minutes : null,
         last_notification_sent: null,
+        subtasks: [],
         created_at: new Date().toISOString(),
         updated_at: new Date().toISOString(),
       };
@@ -408,71 +431,225 @@ export default function HomePage() {
   }
 
   // ---------------------------------------------------------------------------
+  // Subtask helpers
+  // ---------------------------------------------------------------------------
+
+  function updateTodoSubtasks(todoId: number, updater: (prev: Subtask[]) => Subtask[]) {
+    setTodos((prev) =>
+      prev.map((t) => (t.id === todoId ? { ...t, subtasks: updater(t.subtasks) } : t)),
+    );
+  }
+
+  async function addSubtask(todoId: number, title: string) {
+    const res = await fetch(`/api/todos/${todoId}/subtasks`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ title }),
+    });
+    if (!res.ok) return;
+    const subtask: Subtask = await res.json();
+    updateTodoSubtasks(todoId, (prev) => [...prev, subtask]);
+  }
+
+  async function toggleSubtask(todoId: number, subtask: Subtask) {
+    const newCompleted = !subtask.completed;
+    // Optimistic
+    updateTodoSubtasks(todoId, (prev) =>
+      prev.map((s) => (s.id === subtask.id ? { ...s, completed: newCompleted } : s)),
+    );
+    const res = await fetch(`/api/subtasks/${subtask.id}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ completed: newCompleted, todo_id: todoId }),
+    });
+    if (!res.ok) {
+      // Revert
+      updateTodoSubtasks(todoId, (prev) =>
+        prev.map((s) => (s.id === subtask.id ? { ...s, completed: subtask.completed } : s)),
+      );
+    }
+  }
+
+  async function deleteSubtask(todoId: number, subtaskId: number) {
+    updateTodoSubtasks(todoId, (prev) => prev.filter((s) => s.id !== subtaskId));
+    await fetch(`/api/subtasks/${subtaskId}`, {
+      method: 'DELETE',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ todo_id: todoId }),
+    });
+  }
+
+  // ---------------------------------------------------------------------------
   // Render helpers
   // ---------------------------------------------------------------------------
 
   function TodoItem({ todo, accent }: { todo: Todo; accent: string }) {
+    const [newSubtaskTitle, setNewSubtaskTitle] = useState('');
+    const isExpanded = expandedSubtasks.has(todo.id);
+    const { completed: doneCount, total, percent } = (() => {
+      const total = todo.subtasks.length;
+      const completed = todo.subtasks.filter((s) => s.completed).length;
+      return { completed, total, percent: total === 0 ? 0 : Math.round((completed / total) * 100) };
+    })();
+
     return (
-      <li className={`flex items-start gap-3 p-3 rounded-lg border ${accent} bg-white`}>
+      <li className={`flex flex-col p-3 rounded-lg border ${accent} bg-white`}>
+        <div className="flex items-start gap-3">
+          <button
+            onClick={() => handleToggle(todo)}
+            className={`mt-0.5 w-5 h-5 flex-shrink-0 rounded border-2 flex items-center justify-center transition-colors ${
+              todo.completed
+                ? 'bg-green-500 border-green-500 text-white'
+                : 'border-gray-400 hover:border-blue-500'
+            }`}
+            aria-label={todo.completed ? 'Mark incomplete' : 'Mark complete'}
+          >
+            {todo.completed && (
+              <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={3} d="M5 13l4 4L19 7" />
+              </svg>
+            )}
+          </button>
+
+          <div className="flex-1 min-w-0">
+            <div className="flex items-center gap-2 flex-wrap">
+              <p className={`text-sm font-medium break-words ${todo.completed ? 'line-through text-gray-400' : 'text-gray-800'}`}>
+                {todo.title}
+              </p>
+              <PriorityBadge priority={todo.priority} />
+            </div>
+            {todo.description && (
+              <p className="text-xs text-gray-500 mt-0.5 break-words">{todo.description}</p>
+            )}
+            {todo.due_date && (
+              <p className={`text-xs mt-0.5 ${isSingaporeOverdue(todo) ? 'text-red-500 font-medium' : 'text-gray-400'}`}>
+                Due: {formatDueDate(todo.due_date)}
+              </p>
+            )}
+            {todo.is_recurring && (
+              <p className="text-xs text-gray-400 mt-0.5">
+                🔄 {todo.recurrence_pattern}
+              </p>
+            )}
+            {todo.reminder_minutes !== null && todo.reminder_minutes !== undefined && (
+              <p className="text-xs text-gray-400 mt-0.5">
+                🔔 {REMINDER_OPTIONS.find(o => o.value === todo.reminder_minutes)?.label ?? `${todo.reminder_minutes}m before`}
+              </p>
+            )}
+            {/* Collapsed progress bar */}
+            {total > 0 && !isExpanded && (
+              <div className="mt-1.5">
+                <div className="w-full bg-gray-200 rounded-full h-1.5">
+                  <div
+                    className={`h-1.5 rounded-full transition-all ${percent === 100 ? 'bg-green-500' : 'bg-blue-500'}`}
+                    style={{ width: `${percent}%` }}
+                  />
+                </div>
+              </div>
+            )}
+          </div>
+
+          <div className="flex gap-1 flex-shrink-0">
+            <button
+              onClick={() => openEditModal(todo)}
+              className="p-1.5 rounded hover:bg-gray-100 text-gray-400 hover:text-blue-500 transition-colors"
+              aria-label="Edit todo"
+            >
+              ✏️
+            </button>
+            <button
+              onClick={() => setDeletingId(todo.id)}
+              className="p-1.5 rounded hover:bg-gray-100 text-gray-400 hover:text-red-500 transition-colors"
+              aria-label="Delete todo"
+            >
+              🗑️
+            </button>
+          </div>
+        </div>
+
+        {/* Subtasks toggle */}
         <button
-          onClick={() => handleToggle(todo)}
-          className={`mt-0.5 w-5 h-5 flex-shrink-0 rounded border-2 flex items-center justify-center transition-colors ${
-            todo.completed
-              ? 'bg-green-500 border-green-500 text-white'
-              : 'border-gray-400 hover:border-blue-500'
-          }`}
-          aria-label={todo.completed ? 'Mark incomplete' : 'Mark complete'}
+          onClick={() => toggleSubtaskSection(todo.id)}
+          className="mt-2 self-start text-xs text-gray-400 hover:text-gray-600 transition-colors"
         >
-          {todo.completed && (
-            <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={3} d="M5 13l4 4L19 7" />
-            </svg>
-          )}
+          {isExpanded ? '▴ Subtasks' : '▾ Subtasks'} {total > 0 ? `(${doneCount}/${total})` : ''}
         </button>
 
-        <div className="flex-1 min-w-0">
-          <div className="flex items-center gap-2 flex-wrap">
-            <p className={`text-sm font-medium break-words ${todo.completed ? 'line-through text-gray-400' : 'text-gray-800'}`}>
-              {todo.title}
-            </p>
-            <PriorityBadge priority={todo.priority} />
-          </div>
-          {todo.description && (
-            <p className="text-xs text-gray-500 mt-0.5 break-words">{todo.description}</p>
-          )}
-          {todo.due_date && (
-            <p className={`text-xs mt-0.5 ${isSingaporeOverdue(todo) ? 'text-red-500 font-medium' : 'text-gray-400'}`}>
-              Due: {formatDueDate(todo.due_date)}
-            </p>
-          )}
-          {todo.is_recurring && (
-            <p className="text-xs text-gray-400 mt-0.5">
-              🔄 {todo.recurrence_pattern}
-            </p>
-          )}
-          {todo.reminder_minutes !== null && todo.reminder_minutes !== undefined && (
-            <p className="text-xs text-gray-400 mt-0.5">
-              🔔 {REMINDER_OPTIONS.find(o => o.value === todo.reminder_minutes)?.label ?? `${todo.reminder_minutes}m before`}
-            </p>
-          )}
-        </div>
+        {/* Subtask list */}
+        {isExpanded && (
+          <div className="mt-2 pl-8 space-y-1">
+            {/* Progress bar */}
+            {total > 0 && (
+              <div className="mb-2">
+                <div className="flex justify-between text-xs text-gray-500 mb-1">
+                  <span>{doneCount}/{total} completed ({percent}%)</span>
+                </div>
+                <div className="w-full bg-gray-200 rounded-full h-2">
+                  <div
+                    className={`h-2 rounded-full transition-all ${percent === 100 ? 'bg-green-500' : 'bg-blue-500'}`}
+                    style={{ width: `${percent}%` }}
+                  />
+                </div>
+              </div>
+            )}
 
-        <div className="flex gap-1 flex-shrink-0">
-          <button
-            onClick={() => openEditModal(todo)}
-            className="p-1.5 rounded hover:bg-gray-100 text-gray-400 hover:text-blue-500 transition-colors"
-            aria-label="Edit todo"
-          >
-            ✏️
-          </button>
-          <button
-            onClick={() => setDeletingId(todo.id)}
-            className="p-1.5 rounded hover:bg-gray-100 text-gray-400 hover:text-red-500 transition-colors"
-            aria-label="Delete todo"
-          >
-            🗑️
-          </button>
-        </div>
+            {todo.subtasks.map((subtask) => (
+              <div key={subtask.id} className="flex items-center gap-2 group">
+                <button
+                  onClick={() => toggleSubtask(todo.id, subtask)}
+                  className={`w-4 h-4 flex-shrink-0 rounded border-2 flex items-center justify-center transition-colors ${
+                    subtask.completed
+                      ? 'bg-blue-500 border-blue-500 text-white'
+                      : 'border-gray-300 hover:border-blue-400'
+                  }`}
+                  aria-label={subtask.completed ? 'Mark incomplete' : 'Mark complete'}
+                >
+                  {subtask.completed && (
+                    <svg className="w-2.5 h-2.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={3} d="M5 13l4 4L19 7" />
+                    </svg>
+                  )}
+                </button>
+                <span className={`text-xs flex-1 truncate ${subtask.completed ? 'line-through text-gray-400' : 'text-gray-700'}`}>
+                  {subtask.title}
+                </span>
+                <button
+                  onClick={() => deleteSubtask(todo.id, subtask.id)}
+                  className="opacity-0 group-hover:opacity-100 text-gray-400 hover:text-red-500 transition-opacity p-0.5"
+                  aria-label="Delete subtask"
+                >
+                  🗑️
+                </button>
+              </div>
+            ))}
+
+            <div className="flex gap-2 mt-2">
+              <input
+                value={newSubtaskTitle}
+                onChange={(e) => setNewSubtaskTitle(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter' && newSubtaskTitle.trim()) {
+                    addSubtask(todo.id, newSubtaskTitle.trim());
+                    setNewSubtaskTitle('');
+                  }
+                }}
+                placeholder="Add a subtask…"
+                className="flex-1 px-2 py-1 border border-gray-300 rounded text-xs focus:outline-none focus:ring-1 focus:ring-blue-500"
+              />
+              <button
+                onClick={() => {
+                  if (newSubtaskTitle.trim()) {
+                    addSubtask(todo.id, newSubtaskTitle.trim());
+                    setNewSubtaskTitle('');
+                  }
+                }}
+                className="px-2 py-1 bg-blue-600 hover:bg-blue-700 text-white text-xs rounded transition-colors"
+              >
+                Add
+              </button>
+            </div>
+          </div>
+        )}
       </li>
     );
   }

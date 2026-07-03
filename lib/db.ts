@@ -37,6 +37,17 @@ db.exec(`
 
   CREATE INDEX IF NOT EXISTS idx_todos_user_id ON todos(user_id);
   CREATE INDEX IF NOT EXISTS idx_todos_due_date ON todos(due_date);
+
+  CREATE TABLE IF NOT EXISTS subtasks (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    todo_id    INTEGER NOT NULL REFERENCES todos(id) ON DELETE CASCADE,
+    title      TEXT    NOT NULL,
+    completed  INTEGER NOT NULL DEFAULT 0,
+    position   INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT    NOT NULL
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_subtasks_todo_id ON subtasks(todo_id);
 `);
 
 // Migration: add priority column (safe to run multiple times)
@@ -91,6 +102,42 @@ export interface Todo {
   last_notification_sent: string | null;
   created_at: string;
   updated_at: string;
+  subtasks: Subtask[];
+}
+
+// ---------------------------------------------------------------------------
+// Subtask interfaces
+// ---------------------------------------------------------------------------
+
+export interface Subtask {
+  id: number;
+  todo_id: number;
+  title: string;
+  completed: boolean;
+  position: number;
+  created_at: string;
+}
+
+export interface CreateSubtaskInput {
+  title: string;
+}
+
+export interface UpdateSubtaskInput {
+  title?: string;
+  completed?: boolean;
+}
+
+interface SubtaskRow {
+  id: number;
+  todo_id: number;
+  title: string;
+  completed: number;
+  position: number;
+  created_at: string;
+}
+
+function rowToSubtask(row: SubtaskRow): Subtask {
+  return { ...row, completed: row.completed === 1 };
 }
 
 export interface CreateTodoInput {
@@ -140,12 +187,81 @@ function rowToTodo(row: TodoRow): Todo {
     recurrence_pattern: (row.recurrence_pattern as RecurrencePattern | null) ?? null,
     reminder_minutes: row.reminder_minutes ?? null,
     last_notification_sent: row.last_notification_sent ?? null,
+    subtasks: [],
   };
 }
 
 // ---------------------------------------------------------------------------
 // Prepared statements
 // ---------------------------------------------------------------------------
+
+const subtaskStmts = {
+  selectAllForUser: db.prepare<[number]>(`
+    SELECT s.* FROM subtasks s
+    JOIN todos t ON t.id = s.todo_id
+    WHERE t.user_id = ?
+    ORDER BY s.todo_id, s.position ASC
+  `),
+  selectForTodo: db.prepare<[number, number]>(`
+    SELECT s.* FROM subtasks s
+    JOIN todos t ON t.id = s.todo_id
+    WHERE s.todo_id = ? AND t.user_id = ?
+    ORDER BY s.position ASC
+  `),
+  selectById: db.prepare<[number]>(`
+    SELECT * FROM subtasks WHERE id = ?
+  `),
+  maxPosition: db.prepare<[number]>(`
+    SELECT COALESCE(MAX(position), 0) FROM subtasks WHERE todo_id = ?
+  `),
+  insert: db.prepare<[number, string, number, string]>(`
+    INSERT INTO subtasks (todo_id, title, position, created_at) VALUES (?, ?, ?, ?)
+  `),
+  update: db.prepare<[string, number, number]>(`
+    UPDATE subtasks SET title = ?, completed = ? WHERE id = ?
+  `),
+  delete: db.prepare<[number]>(`
+    DELETE FROM subtasks WHERE id = ?
+  `),
+};
+
+export const subtaskDB = {
+  create(todoId: number, userId: number, input: CreateSubtaskInput): Subtask | null {
+    // Verify parent todo belongs to user
+    const todo = stmts.selectById.get(todoId, userId) as TodoRow | undefined;
+    if (!todo) return null;
+    const now = formatSingaporeDate(new Date());
+    const maxPos = (subtaskStmts.maxPosition.pluck().get(todoId) as number | null) ?? 0;
+    const result = subtaskStmts.insert.run(todoId, input.title.trim(), maxPos + 1, now);
+    return rowToSubtask(subtaskStmts.selectById.get(result.lastInsertRowid as number) as SubtaskRow);
+  },
+
+  getForTodo(todoId: number, userId: number): Subtask[] {
+    const rows = subtaskStmts.selectForTodo.all(todoId, userId) as SubtaskRow[];
+    return rows.map(rowToSubtask);
+  },
+
+  update(id: number, todoId: number, userId: number, input: UpdateSubtaskInput): Subtask | null {
+    // Verify parent todo ownership
+    const parentTodo = stmts.selectById.get(todoId, userId) as TodoRow | undefined;
+    if (!parentTodo) return null;
+    const existing = subtaskStmts.selectById.get(id) as SubtaskRow | undefined;
+    if (!existing || existing.todo_id !== todoId) return null;
+    const title = input.title !== undefined ? input.title.trim() : existing.title;
+    const completed = input.completed !== undefined ? (input.completed ? 1 : 0) : existing.completed;
+    subtaskStmts.update.run(title, completed, id);
+    return rowToSubtask(subtaskStmts.selectById.get(id) as SubtaskRow);
+  },
+
+  delete(id: number, todoId: number, userId: number): boolean {
+    const parentTodo = stmts.selectById.get(todoId, userId) as TodoRow | undefined;
+    if (!parentTodo) return false;
+    const existing = subtaskStmts.selectById.get(id) as SubtaskRow | undefined;
+    if (!existing || existing.todo_id !== todoId) return false;
+    subtaskStmts.delete.run(id);
+    return true;
+  },
+};
 
 const stmts = {
   insert: db.prepare<[number, string, string | null, string | null, string, number, string | null, number | null, string, string]>(`
@@ -192,19 +308,37 @@ export const todoDB = {
       now,
       now,
     );
-    return rowToTodo(
+    const todo = rowToTodo(
       stmts.selectById.get(result.lastInsertRowid as number, userId) as TodoRow,
     );
+    todo.subtasks = subtaskDB.getForTodo(todo.id, userId);
+    return todo;
   },
 
   getAll(userId: number): Todo[] {
     const rows = stmts.selectAll.all(userId) as TodoRow[];
-    return rows.map(rowToTodo);
+    const todos = rows.map(rowToTodo);
+    // Batch-fetch all subtasks for this user and attach
+    const allSubtaskRows = subtaskStmts.selectAllForUser.all(userId) as SubtaskRow[];
+    const subtasksByTodoId = new Map<number, Subtask[]>();
+    for (const row of allSubtaskRows) {
+      const subtask = rowToSubtask(row);
+      const arr = subtasksByTodoId.get(row.todo_id) ?? [];
+      arr.push(subtask);
+      subtasksByTodoId.set(row.todo_id, arr);
+    }
+    for (const todo of todos) {
+      todo.subtasks = subtasksByTodoId.get(todo.id) ?? [];
+    }
+    return todos;
   },
 
   getById(userId: number, id: number): Todo | null {
     const row = stmts.selectById.get(id, userId) as TodoRow | undefined;
-    return row ? rowToTodo(row) : null;
+    if (!row) return null;
+    const todo = rowToTodo(row);
+    todo.subtasks = subtaskDB.getForTodo(todo.id, userId);
+    return todo;
   },
 
   update(userId: number, id: number, input: UpdateTodoInput): Todo | null {
@@ -231,7 +365,9 @@ export const todoDB = {
           : (existing.reminder_minutes ?? null);
 
     stmts.updateFull.run(title, description, completed, due_date, priority, is_recurring, recurrence_pattern, reminder_minutes, now, id, userId);
-    return rowToTodo(stmts.selectById.get(id, userId) as TodoRow);
+    const updated = rowToTodo(stmts.selectById.get(id, userId) as TodoRow);
+    updated.subtasks = subtaskDB.getForTodo(id, userId);
+    return updated;
   },
 
   delete(userId: number, id: number): boolean {
