@@ -48,6 +48,51 @@ db.exec(`
   );
 
   CREATE INDEX IF NOT EXISTS idx_subtasks_todo_id ON subtasks(todo_id);
+
+  CREATE TABLE IF NOT EXISTS tags (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id    INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    name       TEXT    NOT NULL,
+    color      TEXT    NOT NULL DEFAULT '#3B82F6',
+    created_at TEXT    NOT NULL,
+    UNIQUE(user_id, name)
+  );
+
+  CREATE TABLE IF NOT EXISTS todo_tags (
+    todo_id INTEGER NOT NULL REFERENCES todos(id) ON DELETE CASCADE,
+    tag_id  INTEGER NOT NULL REFERENCES tags(id)  ON DELETE CASCADE,
+    PRIMARY KEY (todo_id, tag_id)
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_tags_user_id       ON tags(user_id);
+  CREATE INDEX IF NOT EXISTS idx_todo_tags_todo_id  ON todo_tags(todo_id);
+  CREATE INDEX IF NOT EXISTS idx_todo_tags_tag_id   ON todo_tags(tag_id);
+
+  CREATE TABLE IF NOT EXISTS templates (
+    id                   INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id              INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    name                 TEXT    NOT NULL,
+    description          TEXT,
+    category             TEXT,
+    title                TEXT    NOT NULL,
+    notes                TEXT,
+    priority             TEXT    NOT NULL DEFAULT 'medium',
+    is_recurring         INTEGER NOT NULL DEFAULT 0,
+    recurrence_pattern   TEXT,
+    reminder_minutes     INTEGER,
+    due_date_offset_days INTEGER,
+    subtasks_json        TEXT,
+    created_at           TEXT    NOT NULL,
+    updated_at           TEXT    NOT NULL
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_templates_user_id ON templates(user_id);
+
+  CREATE TABLE IF NOT EXISTS holidays (
+    id   INTEGER PRIMARY KEY AUTOINCREMENT,
+    date TEXT    NOT NULL UNIQUE,
+    name TEXT    NOT NULL
+  );
 `);
 
 // Migration: add priority column (safe to run multiple times)
@@ -103,6 +148,29 @@ export interface Todo {
   created_at: string;
   updated_at: string;
   subtasks: Subtask[];
+  tags: Tag[];
+}
+
+// ---------------------------------------------------------------------------
+// Tag interfaces
+// ---------------------------------------------------------------------------
+
+export interface Tag {
+  id: number;
+  user_id: number;
+  name: string;
+  color: string;
+  created_at: string;
+}
+
+export interface CreateTagInput {
+  name: string;
+  color?: string;
+}
+
+export interface UpdateTagInput {
+  name?: string;
+  color?: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -188,12 +256,113 @@ function rowToTodo(row: TodoRow): Todo {
     reminder_minutes: row.reminder_minutes ?? null,
     last_notification_sent: row.last_notification_sent ?? null,
     subtasks: [],
+    tags: [],
   };
 }
 
 // ---------------------------------------------------------------------------
 // Prepared statements
 // ---------------------------------------------------------------------------
+
+const tagStmts = {
+  selectAll: db.prepare<[number]>(`
+    SELECT * FROM tags WHERE user_id = ? ORDER BY name ASC
+  `),
+  selectById: db.prepare<[number, number]>(`
+    SELECT * FROM tags WHERE id = ? AND user_id = ?
+  `),
+  insert: db.prepare<[number, string, string, string]>(`
+    INSERT INTO tags (user_id, name, color, created_at) VALUES (?, ?, ?, ?)
+  `),
+  update: db.prepare<[string, string, number, number]>(`
+    UPDATE tags SET name = ?, color = ? WHERE id = ? AND user_id = ?
+  `),
+  delete: db.prepare<[number, number]>(`
+    DELETE FROM tags WHERE id = ? AND user_id = ?
+  `),
+  selectForTodo: db.prepare<[number, number]>(`
+    SELECT t.* FROM tags t
+    JOIN todo_tags tt ON t.id = tt.tag_id
+    WHERE tt.todo_id = ? AND t.user_id = ?
+    ORDER BY t.name ASC
+  `),
+  selectByName: db.prepare<[number, string]>(`
+    SELECT * FROM tags WHERE user_id = ? AND name = ? LIMIT 1
+  `),
+  selectAllForUser: db.prepare<[number]>(`
+    SELECT tt.todo_id, t.* FROM tags t
+    JOIN todo_tags tt ON t.id = tt.tag_id
+    JOIN todos td ON tt.todo_id = td.id
+    WHERE td.user_id = ?
+    ORDER BY tt.todo_id, t.name ASC
+  `),
+  addToTodo: db.prepare<[number, number]>(`
+    INSERT OR IGNORE INTO todo_tags (todo_id, tag_id) VALUES (?, ?)
+  `),
+  removeFromTodo: db.prepare<[number, number]>(`
+    DELETE FROM todo_tags WHERE todo_id = ? AND tag_id = ?
+  `),
+  clearForTodo: db.prepare<[number]>(`
+    DELETE FROM todo_tags WHERE todo_id = ?
+  `),
+};
+
+export const tagDB = {
+  getAll(userId: number): Tag[] {
+    return tagStmts.selectAll.all(userId) as Tag[];
+  },
+
+  getById(userId: number, id: number): Tag | null {
+    return (tagStmts.selectById.get(id, userId) as Tag | undefined) ?? null;
+  },
+
+  getByName(userId: number, name: string): Tag | null {
+    return (tagStmts.selectByName.get(userId, name.trim()) as Tag | undefined) ?? null;
+  },
+
+  create(userId: number, input: CreateTagInput): Tag {
+    const now = formatSingaporeDate(new Date());
+    const color = input.color ?? '#3B82F6';
+    const result = tagStmts.insert.run(userId, input.name.trim(), color, now);
+    return tagStmts.selectById.get(result.lastInsertRowid as number, userId) as Tag;
+  },
+
+  update(userId: number, id: number, input: UpdateTagInput): Tag | null {
+    const existing = tagDB.getById(userId, id);
+    if (!existing) return null;
+    const name = input.name !== undefined ? input.name.trim() : existing.name;
+    const color = input.color !== undefined ? input.color : existing.color;
+    tagStmts.update.run(name, color, id, userId);
+    return tagStmts.selectById.get(id, userId) as Tag;
+  },
+
+  delete(userId: number, id: number): boolean {
+    const result = tagStmts.delete.run(id, userId);
+    return result.changes > 0;
+  },
+
+  getForTodo(userId: number, todoId: number): Tag[] {
+    return tagStmts.selectForTodo.all(todoId, userId) as Tag[];
+  },
+
+  addToTodo(userId: number, todoId: number, tagId: number): void {
+    // verify tag belongs to user
+    const tag = tagDB.getById(userId, tagId);
+    if (tag) tagStmts.addToTodo.run(todoId, tagId);
+  },
+
+  removeFromTodo(userId: number, todoId: number, tagId: number): void {
+    tagStmts.removeFromTodo.run(todoId, tagId);
+  },
+
+  setForTodo(userId: number, todoId: number, tagIds: number[]): void {
+    tagStmts.clearForTodo.run(todoId);
+    for (const tagId of tagIds) {
+      const tag = tagDB.getById(userId, tagId);
+      if (tag) tagStmts.addToTodo.run(todoId, tagId);
+    }
+  },
+};
 
 const subtaskStmts = {
   selectAllForUser: db.prepare<[number]>(`
@@ -312,6 +481,7 @@ export const todoDB = {
       stmts.selectById.get(result.lastInsertRowid as number, userId) as TodoRow,
     );
     todo.subtasks = subtaskDB.getForTodo(todo.id, userId);
+    todo.tags = tagDB.getForTodo(userId, todo.id);
     return todo;
   },
 
@@ -327,8 +497,18 @@ export const todoDB = {
       arr.push(subtask);
       subtasksByTodoId.set(row.todo_id, arr);
     }
+    // Batch-fetch all tags for this user's todos
+    const allTagRows = tagStmts.selectAllForUser.all(userId) as (Tag & { todo_id: number })[];
+    const tagsByTodoId = new Map<number, Tag[]>();
+    for (const row of allTagRows) {
+      const { todo_id, ...tag } = row;
+      const arr = tagsByTodoId.get(todo_id) ?? [];
+      arr.push(tag as Tag);
+      tagsByTodoId.set(todo_id, arr);
+    }
     for (const todo of todos) {
       todo.subtasks = subtasksByTodoId.get(todo.id) ?? [];
+      todo.tags = tagsByTodoId.get(todo.id) ?? [];
     }
     return todos;
   },
@@ -338,6 +518,7 @@ export const todoDB = {
     if (!row) return null;
     const todo = rowToTodo(row);
     todo.subtasks = subtaskDB.getForTodo(todo.id, userId);
+    todo.tags = tagDB.getForTodo(userId, todo.id);
     return todo;
   },
 
@@ -367,6 +548,7 @@ export const todoDB = {
     stmts.updateFull.run(title, description, completed, due_date, priority, is_recurring, recurrence_pattern, reminder_minutes, now, id, userId);
     const updated = rowToTodo(stmts.selectById.get(id, userId) as TodoRow);
     updated.subtasks = subtaskDB.getForTodo(id, userId);
+    updated.tags = tagDB.getForTodo(userId, id);
     return updated;
   },
 
@@ -442,3 +624,181 @@ export const notificationDB = {
     notifStmts.markNotificationSent.run(sentAt, todoId);
   },
 };
+
+// ---------------------------------------------------------------------------
+// templateDB — template CRUD
+// ---------------------------------------------------------------------------
+
+export interface Template {
+  id: number;
+  user_id: number;
+  name: string;
+  description?: string | null;
+  category?: string | null;
+  title: string;
+  notes?: string | null;
+  priority: Priority;
+  is_recurring: boolean;
+  recurrence_pattern: RecurrencePattern | null;
+  reminder_minutes: number | null;
+  due_date_offset_days: number | null;
+  subtasks_json: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface TemplateSubtask {
+  title: string;
+  position: number;
+}
+
+export interface CreateTemplateInput {
+  name: string;
+  description?: string;
+  category?: string;
+  title: string;
+  notes?: string;
+  priority: Priority;
+  is_recurring: boolean;
+  recurrence_pattern?: RecurrencePattern | null;
+  reminder_minutes?: number | null;
+  due_date_offset_days?: number | null;
+  subtasks: TemplateSubtask[];
+}
+
+interface TemplateRow {
+  id: number;
+  user_id: number;
+  name: string;
+  description: string | null;
+  category: string | null;
+  title: string;
+  notes: string | null;
+  priority: string;
+  is_recurring: number;
+  recurrence_pattern: string | null;
+  reminder_minutes: number | null;
+  due_date_offset_days: number | null;
+  subtasks_json: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+function rowToTemplate(row: TemplateRow): Template {
+  return {
+    ...row,
+    priority: (row.priority as Priority) ?? 'medium',
+    is_recurring: row.is_recurring === 1,
+    recurrence_pattern: (row.recurrence_pattern as RecurrencePattern | null) ?? null,
+  };
+}
+
+const tmplStmts = {
+  selectAll: db.prepare<[number]>(`SELECT * FROM templates WHERE user_id = ? ORDER BY name ASC`),
+  selectById: db.prepare<[number, number]>(`SELECT * FROM templates WHERE id = ? AND user_id = ?`),
+  insert: db.prepare<[number, string, string | null, string | null, string, string | null, string, number, string | null, number | null, number | null, string | null, string, string]>(`
+    INSERT INTO templates
+      (user_id, name, description, category, title, notes, priority, is_recurring,
+       recurrence_pattern, reminder_minutes, due_date_offset_days, subtasks_json,
+       created_at, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `),
+  update: db.prepare<[string, string | null, string | null, string, string | null, string, number, string | null, number | null, number | null, string | null, string, number, number]>(`
+    UPDATE templates
+    SET name = ?, description = ?, category = ?, title = ?, notes = ?,
+        priority = ?, is_recurring = ?, recurrence_pattern = ?,
+        reminder_minutes = ?, due_date_offset_days = ?, subtasks_json = ?, updated_at = ?
+    WHERE id = ? AND user_id = ?
+  `),
+  delete: db.prepare<[number, number]>(`DELETE FROM templates WHERE id = ? AND user_id = ?`),
+};
+
+export const templateDB = {
+  create(userId: number, input: CreateTemplateInput): Template {
+    const now = formatSingaporeDate(new Date());
+    const subtasksJson = JSON.stringify(input.subtasks ?? []);
+    const result = tmplStmts.insert.run(
+      userId,
+      input.name.trim(),
+      input.description?.trim() ?? null,
+      input.category?.trim() ?? null,
+      input.title.trim(),
+      input.notes?.trim() ?? null,
+      input.priority,
+      input.is_recurring ? 1 : 0,
+      input.recurrence_pattern ?? null,
+      input.reminder_minutes ?? null,
+      input.due_date_offset_days ?? null,
+      subtasksJson,
+      now,
+      now,
+    );
+    return rowToTemplate(tmplStmts.selectById.get(result.lastInsertRowid as number, userId) as TemplateRow);
+  },
+
+  getAll(userId: number): Template[] {
+    return (tmplStmts.selectAll.all(userId) as TemplateRow[]).map(rowToTemplate);
+  },
+
+  getById(userId: number, id: number): Template | null {
+    const row = tmplStmts.selectById.get(id, userId) as TemplateRow | undefined;
+    return row ? rowToTemplate(row) : null;
+  },
+
+  update(userId: number, id: number, input: Partial<CreateTemplateInput>): Template | null {
+    const existing = templateDB.getById(userId, id);
+    if (!existing) return null;
+    const now = formatSingaporeDate(new Date());
+    const name = input.name !== undefined ? input.name.trim() : existing.name;
+    const description = input.description !== undefined ? (input.description?.trim() ?? null) : (existing.description ?? null);
+    const category = input.category !== undefined ? (input.category?.trim() ?? null) : (existing.category ?? null);
+    const title = input.title !== undefined ? input.title.trim() : existing.title;
+    const notes = input.notes !== undefined ? (input.notes?.trim() ?? null) : (existing.notes ?? null);
+    const priority: Priority = input.priority ?? existing.priority;
+    const is_recurring = input.is_recurring !== undefined ? (input.is_recurring ? 1 : 0) : (existing.is_recurring ? 1 : 0);
+    const recurrence_pattern = input.recurrence_pattern !== undefined ? (input.recurrence_pattern ?? null) : existing.recurrence_pattern;
+    const reminder_minutes = input.reminder_minutes !== undefined ? (input.reminder_minutes ?? null) : existing.reminder_minutes;
+    const due_date_offset_days = input.due_date_offset_days !== undefined ? (input.due_date_offset_days ?? null) : existing.due_date_offset_days;
+    const subtasksJson = input.subtasks !== undefined ? JSON.stringify(input.subtasks) : (existing.subtasks_json ?? '[]');
+    tmplStmts.update.run(name, description, category, title, notes, priority, is_recurring, recurrence_pattern, reminder_minutes, due_date_offset_days, subtasksJson, now, id, userId);
+    return rowToTemplate(tmplStmts.selectById.get(id, userId) as TemplateRow);
+  },
+
+  delete(userId: number, id: number): boolean {
+    return tmplStmts.delete.run(id, userId).changes > 0;
+  },
+};
+
+// ---------------------------------------------------------------------------
+// holidayDB — Singapore public holidays
+// ---------------------------------------------------------------------------
+
+export interface Holiday {
+  id: number;
+  date: string; // 'YYYY-MM-DD'
+  name: string;
+}
+
+const holidayStmts = {
+  selectByMonth: db.prepare<[string]>(
+    "SELECT * FROM holidays WHERE date LIKE ? ORDER BY date",
+  ),
+  insertOrIgnore: db.prepare<[string, string]>(
+    "INSERT OR IGNORE INTO holidays (date, name) VALUES (?, ?)",
+  ),
+};
+
+export const holidayDB = {
+  getForMonth(month: string): Holiday[] {
+    // month = 'YYYY-MM'
+    return holidayStmts.selectByMonth.all(`${month}-%`) as Holiday[];
+  },
+  seed(holidays: { date: string; name: string }[]): void {
+    for (const h of holidays) {
+      holidayStmts.insertOrIgnore.run(h.date, h.name);
+    }
+  },
+};
+
+// Export raw db for seed scripts
+export { db };

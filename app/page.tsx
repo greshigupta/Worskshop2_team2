@@ -1,7 +1,20 @@
 'use client';
 
 import { useState, useEffect, useCallback } from 'react';
+import Link from 'next/link';
 import { useNotifications } from '@/lib/hooks/useNotifications';
+
+// ---------------------------------------------------------------------------
+// Debounce hook
+// ---------------------------------------------------------------------------
+function useDebounce<T>(value: T, delay: number): T {
+  const [debounced, setDebounced] = useState<T>(value);
+  useEffect(() => {
+    const timer = setTimeout(() => setDebounced(value), delay);
+    return () => clearTimeout(timer);
+  }, [value, delay]);
+  return debounced;
+}
 
 // ---------------------------------------------------------------------------
 // Types
@@ -25,6 +38,15 @@ interface Todo {
   created_at: string;
   updated_at: string;
   subtasks: Subtask[];
+  tags: Tag[];
+}
+
+interface Tag {
+  id: number;
+  user_id: number;
+  name: string;
+  color: string;
+  created_at: string;
 }
 
 interface Subtask {
@@ -36,6 +58,24 @@ interface Subtask {
   created_at: string;
 }
 
+interface Template {
+  id: number;
+  user_id: number;
+  name: string;
+  description?: string | null;
+  category?: string | null;
+  title: string;
+  notes?: string | null;
+  priority: Priority;
+  is_recurring: boolean;
+  recurrence_pattern: RecurrencePattern | null;
+  reminder_minutes: number | null;
+  due_date_offset_days: number | null;
+  subtasks_json: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
 interface FormState {
   title: string;
   description: string;
@@ -44,6 +84,7 @@ interface FormState {
   is_recurring: boolean;
   recurrence_pattern: RecurrencePattern;
   reminder_minutes: number | null;
+  selectedTagIds: number[];
 }
 
 const EMPTY_FORM: FormState = {
@@ -54,7 +95,12 @@ const EMPTY_FORM: FormState = {
   is_recurring: false,
   recurrence_pattern: 'daily',
   reminder_minutes: null,
+  selectedTagIds: [],
 };
+
+const PRESET_COLORS = [
+  '#EF4444', '#F59E0B', '#10B981', '#3B82F6', '#8B5CF6', '#EC4899', '#6B7280',
+];
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -99,6 +145,20 @@ function PriorityBadge({ priority }: { priority: Priority }) {
   );
 }
 
+function TagBadge({ tag, onClick }: { tag: Tag; onClick?: () => void }) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className="px-2 py-0.5 rounded-full text-xs font-medium text-white transition-opacity hover:opacity-80"
+      style={{ backgroundColor: tag.color }}
+      title={`Filter by: ${tag.name}`}
+    >
+      {tag.name}
+    </button>
+  );
+}
+
 function isSingaporeOverdue(todo: Todo): boolean {
   if (todo.completed || !todo.due_date) return false;
   const sgNow = new Date(new Date().toLocaleString('en-US', { timeZone: 'Asia/Singapore' }));
@@ -135,6 +195,51 @@ export default function HomePage() {
 
   // Priority filter
   const [priorityFilter, setPriorityFilter] = useState<Priority | 'all'>('all');
+
+  // Search
+  const [rawSearch, setRawSearch] = useState('');
+
+  // Tag filter
+  const [activeTagFilter, setActiveTagFilter] = useState<Tag | null>(null);
+
+  // All tags (for selectors + manage modal)
+  const [allTags, setAllTags] = useState<Tag[]>([]);
+  const [showManageTags, setShowManageTags] = useState(false);
+  const [newTagName, setNewTagName] = useState('');
+  const [newTagColor, setNewTagColor] = useState('#3B82F6');
+  const [tagFormError, setTagFormError] = useState<string | null>(null);
+  const [editingTag, setEditingTag] = useState<Tag | null>(null);
+  const [editTagName, setEditTagName] = useState('');
+  const [editTagColor, setEditTagColor] = useState('');
+
+  // Templates
+  const [templates, setTemplates] = useState<Template[]>([]);
+  const [showSaveTemplate, setShowSaveTemplate] = useState(false);
+  const [templateSourceTodo, setTemplateSourceTodo] = useState<Todo | null>(null);
+  const [tmplName, setTmplName] = useState('');
+  const [tmplDesc, setTmplDesc] = useState('');
+  const [tmplCategory, setTmplCategory] = useState('');
+  const [showUseTemplate, setShowUseTemplate] = useState(false);
+  const [tmplCategoryFilter, setTmplCategoryFilter] = useState('');
+  const [deletingTemplateId, setDeletingTemplateId] = useState<number | null>(null);
+
+  // Export / Import
+  const [isExporting, setIsExporting] = useState(false);
+  const [toast, setToast] = useState<{ message: string; type: 'success' | 'error' } | null>(null);
+
+  function showToast(message: string, type: 'success' | 'error') {
+    setToast({ message, type });
+    setTimeout(() => setToast(null), 4000);
+  }
+
+  function validateExportFormat(data: unknown): string | null {
+    if (!data || typeof data !== 'object') return 'File is not valid JSON';
+    const d = data as Record<string, unknown>;
+    if (d.version !== '1.0') return `Unsupported version: ${String(d.version)}`;
+    if (!Array.isArray(d.todos)) return 'Missing todos array';
+    if (!Array.isArray(d.tags)) return 'Missing tags array';
+    return null;
+  }
 
   // Expanded subtask sections (Set of todo IDs)
   const [expandedSubtasks, setExpandedSubtasks] = useState<Set<number>>(new Set());
@@ -174,7 +279,7 @@ export default function HomePage() {
       }
     }
     setIsAuthenticated(true);
-    await fetchTodos();
+    await Promise.all([fetchTodos(), fetchTags(), fetchTemplates()]);
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
@@ -199,12 +304,58 @@ export default function HomePage() {
     }
   };
 
+  const fetchTags = async () => {
+    try {
+      const res = await fetch('/api/tags');
+      if (res.ok) {
+        const data: Tag[] = await res.json();
+        setAllTags(data);
+      }
+    } catch {
+      // silently fail
+    }
+  };
+
+  const fetchTemplates = async () => {
+    try {
+      const res = await fetch('/api/templates');
+      if (res.ok) {
+        const data: Template[] = await res.json();
+        setTemplates(data);
+      }
+    } catch {
+      // silently fail
+    }
+  };
+
   // ---------------------------------------------------------------------------
   // Categorize & sort todos
   // ---------------------------------------------------------------------------
 
-  const visibleTodos =
-    priorityFilter === 'all' ? todos : todos.filter((t) => t.priority === priorityFilter);
+  const searchQuery = useDebounce(rawSearch, 300);
+
+  const visibleTodos = todos.filter((todo) => {
+    // 1. Text search — title OR tag names
+    if (searchQuery.trim()) {
+      const q = searchQuery.toLowerCase().trim();
+      const matchesTitle = todo.title.toLowerCase().includes(q);
+      const matchesTag = todo.tags.some((t) => t.name.toLowerCase().includes(q));
+      if (!matchesTitle && !matchesTag) return false;
+    }
+    // 2. Priority filter
+    if (priorityFilter !== 'all' && todo.priority !== priorityFilter) return false;
+    // 3. Tag filter
+    if (activeTagFilter && !todo.tags.some((t) => t.id === activeTagFilter.id)) return false;
+    return true;
+  });
+
+  const hasActiveFilters = rawSearch !== '' || priorityFilter !== 'all' || activeTagFilter !== null;
+
+  function clearAllFilters() {
+    setRawSearch('');
+    setPriorityFilter('all');
+    setActiveTagFilter(null);
+  }
 
   const overdue = sortByPriority(
     visibleTodos.filter((t) => isSingaporeOverdue(t)),
@@ -241,6 +392,7 @@ export default function HomePage() {
       is_recurring: todo.is_recurring,
       recurrence_pattern: todo.recurrence_pattern ?? 'daily',
       reminder_minutes: todo.reminder_minutes,
+      selectedTagIds: todo.tags.map((t) => t.id),
     });
     setFormError(null);
     setShowModal(true);
@@ -319,8 +471,19 @@ export default function HomePage() {
           return;
         }
         const { todo: updated, nextTodo }: { todo: Todo; nextTodo: Todo | null } = await res.json();
+        // Set tags for updated todo
+        if (form.selectedTagIds.length > 0 || editingTodo.tags.length > 0) {
+          await fetch(`/api/todos/${editingTodo.id}/tags`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ tagIds: form.selectedTagIds }),
+          });
+        }
+        // Refresh to get accurate tag state
+        const selectedTags = allTags.filter((t) => form.selectedTagIds.includes(t.id));
+        const withTags = { ...updated, tags: selectedTags };
         setTodos((prev) => {
-          const replaced = prev.map((t) => (t.id === updated.id ? updated : t));
+          const replaced = prev.map((t) => (t.id === withTags.id ? withTags : t));
           return nextTodo ? [nextTodo, ...replaced] : replaced;
         });
         closeModal();
@@ -344,6 +507,7 @@ export default function HomePage() {
         reminder_minutes: form.due_date ? form.reminder_minutes : null,
         last_notification_sent: null,
         subtasks: [],
+        tags: allTags.filter((t) => form.selectedTagIds.includes(t.id)),
         created_at: new Date().toISOString(),
         updated_at: new Date().toISOString(),
       };
@@ -364,7 +528,16 @@ export default function HomePage() {
           return;
         }
         const created: Todo = await res.json();
-        setTodos((prev) => prev.map((t) => (t.id === tempId ? created : t)));
+        // Set tags
+        if (form.selectedTagIds.length > 0) {
+          await fetch(`/api/todos/${created.id}/tags`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ tagIds: form.selectedTagIds }),
+          });
+        }
+        const withTags = { ...created, tags: allTags.filter((t) => form.selectedTagIds.includes(t.id)) };
+        setTodos((prev) => prev.map((t) => (t.id === tempId ? withTags : t)));
       } catch {
         setTodos((prev) => prev.filter((t) => t.id !== tempId));
         setError('Network error while creating todo.');
@@ -428,6 +601,176 @@ export default function HomePage() {
       if (removed) setTodos((prev) => [...prev, removed]);
       setError('Network error while deleting todo.');
     }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Tag management handlers
+  // ---------------------------------------------------------------------------
+
+  async function handleCreateTag() {
+    setTagFormError(null);
+    const name = newTagName.trim();
+    if (!name) { setTagFormError('Name is required.'); return; }
+    const res = await fetch('/api/tags', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name, color: newTagColor }),
+    });
+    const data = await res.json();
+    if (!res.ok) { setTagFormError(data.error ?? 'Failed to create tag'); return; }
+    setAllTags((prev) => [...prev, data].sort((a, b) => a.name.localeCompare(b.name)));
+    setNewTagName('');
+    setNewTagColor('#3B82F6');
+  }
+
+  async function handleUpdateTag(tagId: number) {
+    const name = editTagName.trim();
+    if (!name) return;
+    const res = await fetch(`/api/tags/${tagId}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name, color: editTagColor }),
+    });
+    if (!res.ok) return;
+    const updated: Tag = await res.json();
+    setAllTags((prev) => prev.map((t) => (t.id === tagId ? updated : t)));
+    // Update any todos that have this tag
+    setTodos((prev) =>
+      prev.map((todo) => ({
+        ...todo,
+        tags: todo.tags.map((t) => (t.id === tagId ? updated : t)),
+      })),
+    );
+    setEditingTag(null);
+  }
+
+  async function handleDeleteTag(tagId: number) {
+    const res = await fetch(`/api/tags/${tagId}`, { method: 'DELETE' });
+    if (!res.ok) return;
+    setAllTags((prev) => prev.filter((t) => t.id !== tagId));
+    setTodos((prev) =>
+      prev.map((todo) => ({ ...todo, tags: todo.tags.filter((t) => t.id !== tagId) })),
+    );
+    if (activeTagFilter?.id === tagId) setActiveTagFilter(null);
+  }
+
+  // ---------------------------------------------------------------------------
+  // Template handlers
+  // ---------------------------------------------------------------------------
+
+  function openSaveAsTemplate(todo: Todo) {
+    setTemplateSourceTodo(todo);
+    setTmplName(todo.title);
+    setTmplDesc('');
+    setTmplCategory('');
+    setShowSaveTemplate(true);
+  }
+
+  async function handleSaveTemplate() {
+    if (!templateSourceTodo || !tmplName.trim()) return;
+    const todo = templateSourceTodo;
+
+    // Calculate offset days
+    let due_date_offset_days: number | null = null;
+    if (todo.due_date) {
+      const msPerDay = 86_400_000;
+      const diff = new Date(todo.due_date).getTime() - Date.now();
+      due_date_offset_days = Math.max(0, Math.round(diff / msPerDay));
+    }
+
+    const subtasks = todo.subtasks.map((s, i) => ({ title: s.title, position: i }));
+
+    const res = await fetch('/api/templates', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        name: tmplName.trim(),
+        description: tmplDesc.trim() || undefined,
+        category: tmplCategory.trim() || undefined,
+        title: todo.title,
+        notes: todo.description ?? undefined,
+        priority: todo.priority,
+        is_recurring: todo.is_recurring,
+        recurrence_pattern: todo.recurrence_pattern,
+        reminder_minutes: todo.reminder_minutes,
+        due_date_offset_days,
+        subtasks,
+      }),
+    });
+    if (res.ok) {
+      const template: Template = await res.json();
+      setTemplates((prev) => [...prev, template].sort((a, b) => a.name.localeCompare(b.name)));
+      setShowSaveTemplate(false);
+    }
+  }
+
+  async function handleUseTemplate(templateId: number) {
+    const res = await fetch(`/api/templates/${templateId}/use`, { method: 'POST' });
+    if (!res.ok) return;
+    const todo: Todo = await res.json();
+    setTodos((prev) => [todo, ...prev]);
+    setShowUseTemplate(false);
+  }
+
+  async function handleDeleteTemplate(templateId: number) {
+    const res = await fetch(`/api/templates/${templateId}`, { method: 'DELETE' });
+    if (res.ok) {
+      setTemplates((prev) => prev.filter((t) => t.id !== templateId));
+    }
+    setDeletingTemplateId(null);
+  }
+
+  // ---------------------------------------------------------------------------
+  // Export / Import handlers
+  // ---------------------------------------------------------------------------
+
+  async function handleExport() {
+    setIsExporting(true);
+    try {
+      const res = await fetch('/api/todos/export');
+      if (!res.ok) { showToast('Export failed', 'error'); return; }
+      const data = await res.json();
+      const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `todos-export-${new Date().toISOString().slice(0, 10)}.json`;
+      a.click();
+      URL.revokeObjectURL(url);
+    } catch {
+      showToast('Export failed', 'error');
+    } finally {
+      setIsExporting(false);
+    }
+  }
+
+  async function handleImport(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const text = await file.text();
+    let data: unknown;
+    try {
+      data = JSON.parse(text);
+    } catch {
+      showToast('Import failed: file is not valid JSON', 'error');
+      e.target.value = '';
+      return;
+    }
+    const err = validateExportFormat(data);
+    if (err) { showToast(`Import failed: ${err}`, 'error'); e.target.value = ''; return; }
+    const res = await fetch('/api/todos/import', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: text,
+    });
+    const result = await res.json();
+    if (!res.ok) { showToast(`Import failed: ${result.error}`, 'error'); }
+    else {
+      showToast(`Imported ${result.imported.todos} todos and ${result.imported.tags} tags`, 'success');
+      await fetchTodos();
+      await fetchTags();
+    }
+    e.target.value = '';
   }
 
   // ---------------------------------------------------------------------------
@@ -536,6 +879,14 @@ export default function HomePage() {
                 🔔 {REMINDER_OPTIONS.find(o => o.value === todo.reminder_minutes)?.label ?? `${todo.reminder_minutes}m before`}
               </p>
             )}
+            {/* Tag badges */}
+            {todo.tags.length > 0 && (
+              <div className="flex flex-wrap gap-1 mt-1">
+                {todo.tags.map((tag) => (
+                  <TagBadge key={tag.id} tag={tag} onClick={() => setActiveTagFilter(tag)} />
+                ))}
+              </div>
+            )}
             {/* Collapsed progress bar */}
             {total > 0 && !isExpanded && (
               <div className="mt-1.5">
@@ -550,6 +901,14 @@ export default function HomePage() {
           </div>
 
           <div className="flex gap-1 flex-shrink-0">
+            <button
+              onClick={() => openSaveAsTemplate(todo)}
+              className="p-1.5 rounded hover:bg-gray-100 text-gray-400 hover:text-green-500 transition-colors"
+              aria-label="Save as template"
+              title="Save as Template"
+            >
+              📋
+            </button>
             <button
               onClick={() => openEditModal(todo)}
               className="p-1.5 rounded hover:bg-gray-100 text-gray-400 hover:text-blue-500 transition-colors"
@@ -704,7 +1063,10 @@ export default function HomePage() {
     <div className="max-w-2xl mx-auto px-4 py-8">
       {/* Header */}
       <div className="flex items-center justify-between mb-4">
-        <h1 className="text-2xl font-bold text-gray-800">My Todos</h1>
+        <div className="flex items-center gap-4">
+          <h1 className="text-2xl font-bold text-gray-800">My Todos</h1>
+          <Link href="/calendar" className="text-sm text-blue-600 hover:underline">📅 Calendar</Link>
+        </div>
         <button
           onClick={openCreateModal}
           className="flex items-center gap-2 px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white text-sm font-medium rounded-lg transition-colors"
@@ -713,8 +1075,28 @@ export default function HomePage() {
         </button>
       </div>
 
+      {/* Search */}
+      <div className="relative mb-4">
+        <input
+          type="search"
+          value={rawSearch}
+          onChange={(e) => setRawSearch(e.target.value)}
+          placeholder="Search todos…"
+          aria-label="Search todos"
+          className="w-full pl-9 pr-9 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+        />
+        <span className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400 pointer-events-none">🔍</span>
+        {rawSearch && (
+          <button
+            onClick={() => setRawSearch('')}
+            className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600"
+            aria-label="Clear search"
+          >✕</button>
+        )}
+      </div>
+
       {/* Toolbar */}
-      <div className="flex items-center gap-3 mb-6 flex-wrap">
+      <div className="flex items-center gap-3 mb-3 flex-wrap">
         <label htmlFor="priority-filter" className="sr-only">Filter by priority</label>
         <select
           id="priority-filter"
@@ -728,18 +1110,6 @@ export default function HomePage() {
           <option value="medium">🟡 Medium</option>
           <option value="low">🔵 Low</option>
         </select>
-        {priorityFilter !== 'all' && (
-          <span className="flex items-center gap-1 px-2 py-1 bg-blue-50 border border-blue-200 text-blue-700 text-xs rounded-full">
-            Priority: {priorityFilter}
-            <button
-              onClick={() => setPriorityFilter('all')}
-              className="ml-1 hover:text-blue-900"
-              aria-label="Clear priority filter"
-            >
-              ✕
-            </button>
-          </span>
-        )}
         {supported && permission !== 'granted' && (
           <button
             onClick={requestPermission}
@@ -748,7 +1118,66 @@ export default function HomePage() {
             🔔 Enable Notifications
           </button>
         )}
+        <button
+          onClick={() => setShowManageTags(true)}
+          className="flex items-center gap-1 px-3 py-1.5 bg-gray-50 border border-gray-300 text-gray-600 text-xs rounded-lg hover:bg-gray-100 transition-colors"
+        >
+          🏷️ Manage Tags
+        </button>
+        <button
+          onClick={() => setShowUseTemplate(true)}
+          className="flex items-center gap-1 px-3 py-1.5 bg-gray-50 border border-gray-300 text-gray-600 text-xs rounded-lg hover:bg-gray-100 transition-colors"
+        >
+          📋 Use Template
+        </button>
+        <button
+          onClick={handleExport}
+          disabled={isExporting}
+          className="flex items-center gap-1 px-3 py-1.5 bg-gray-50 border border-gray-300 text-gray-600 text-xs rounded-lg hover:bg-gray-100 disabled:opacity-50 transition-colors"
+        >
+          {isExporting ? 'Exporting…' : '⬇️ Export'}
+        </button>
+        <label className="flex items-center gap-1 px-3 py-1.5 bg-gray-50 border border-gray-300 text-gray-600 text-xs rounded-lg hover:bg-gray-100 cursor-pointer transition-colors">
+          ⬆️ Import
+          <input
+            type="file"
+            accept=".json"
+            className="hidden"
+            onChange={handleImport}
+          />
+        </label>
       </div>
+
+      {/* Active filters bar */}
+      {hasActiveFilters && (
+        <div className="flex items-center gap-2 flex-wrap mb-4 p-2 bg-gray-50 border border-gray-200 rounded-lg">
+          <span className="text-xs text-gray-500 font-medium">Filters:</span>
+          {searchQuery.trim() && (
+            <span className="flex items-center gap-1 px-2 py-0.5 bg-white border border-gray-300 text-gray-700 text-xs rounded-full">
+              Search: “{searchQuery.trim()}”
+              <button onClick={() => setRawSearch('')} className="ml-1 hover:text-red-500" aria-label="Clear search filter">✕</button>
+            </span>
+          )}
+          {priorityFilter !== 'all' && (
+            <span className="flex items-center gap-1 px-2 py-0.5 bg-white border border-blue-200 text-blue-700 text-xs rounded-full">
+              Priority: {priorityFilter}
+              <button onClick={() => setPriorityFilter('all')} className="ml-1 hover:text-red-500" aria-label="Clear priority filter">✕</button>
+            </span>
+          )}
+          {activeTagFilter && (
+            <span className="flex items-center gap-1 px-2 py-0.5 bg-white text-xs rounded-full border" style={{ borderColor: activeTagFilter.color }}>
+              Tag: <TagBadge tag={activeTagFilter} />
+              <button onClick={() => setActiveTagFilter(null)} className="ml-1 text-gray-400 hover:text-red-500" aria-label="Clear tag filter">✕</button>
+            </span>
+          )}
+          <button
+            onClick={clearAllFilters}
+            className="text-xs text-red-500 hover:text-red-700 hover:underline ml-auto"
+          >
+            Clear all
+          </button>
+        </div>
+      )}
 
       {/* Global error */}
       {error && (
@@ -763,7 +1192,7 @@ export default function HomePage() {
         <p className="text-gray-400 text-sm text-center py-8">Loading todos…</p>
       )}
 
-      {/* Empty state */}
+      {/* Empty state — no todos at all */}
       {!loading && todos.length === 0 && (
         <div className="text-center py-16">
           <p className="text-gray-400 text-lg">No todos yet.</p>
@@ -776,11 +1205,12 @@ export default function HomePage() {
         </div>
       )}
 
-      {!loading && todos.length > 0 && overdue.length === 0 && active.length === 0 && completed.length === 0 && (
-        <div className="text-center py-10">
-          <p className="text-gray-400 text-sm">No todos match the current filter.</p>
-          <button onClick={() => setPriorityFilter('all')} className="mt-2 text-blue-500 underline text-sm">
-            Clear filter
+      {/* Empty state — filters active but no results */}
+      {!loading && todos.length > 0 && visibleTodos.length === 0 && (
+        <div className="text-center py-12">
+          <p className="text-gray-400 text-lg">No todos match your filters.</p>
+          <button onClick={clearAllFilters} className="mt-2 text-blue-500 underline text-sm">
+            Clear filters
           </button>
         </div>
       )}
@@ -922,6 +1352,38 @@ export default function HomePage() {
                 </select>
               </div>
 
+              {/* Tags selector */}
+              {allTags.length > 0 && (
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">
+                    Tags
+                  </label>
+                  <div className="flex flex-wrap gap-2">
+                    {allTags.map((tag) => (
+                      <label key={tag.id} className="flex items-center gap-1 cursor-pointer">
+                        <input
+                          type="checkbox"
+                          checked={form.selectedTagIds.includes(tag.id)}
+                          onChange={() =>
+                            setForm((f) => ({
+                              ...f,
+                              selectedTagIds: f.selectedTagIds.includes(tag.id)
+                                ? f.selectedTagIds.filter((id) => id !== tag.id)
+                                : [...f.selectedTagIds, tag.id],
+                            }))
+                          }
+                          className="w-3.5 h-3.5"
+                        />
+                        <TagBadge tag={tag} />
+                      </label>
+                    ))}
+                  </div>
+                </div>
+              )}
+              {allTags.length === 0 && (
+                <p className="text-xs text-gray-400">No tags yet. Create some in “Manage Tags”.</p>
+              )}
+
               <div className="flex gap-3 pt-1">
                 <button
                   type="submit"
@@ -939,6 +1401,289 @@ export default function HomePage() {
                 </button>
               </div>
             </form>
+          </div>
+        </div>
+      )}
+
+      {/* ------------------------------------------------------------------ */}
+      {/* Save as Template Modal                                              */}
+      {/* ------------------------------------------------------------------ */}
+      {showSaveTemplate && templateSourceTodo && (
+        <div
+          className="fixed inset-0 bg-black/40 flex items-center justify-center z-50 p-4"
+          onClick={(e) => { if (e.target === e.currentTarget) setShowSaveTemplate(false); }}
+        >
+          <div className="bg-white rounded-xl shadow-xl w-full max-w-md p-6">
+            <h2 className="text-lg font-semibold text-gray-800 mb-4">Save as Template</h2>
+            <div className="space-y-3">
+              <div>
+                <label className="block text-xs font-medium text-gray-600 mb-1">Template Name *</label>
+                <input
+                  type="text"
+                  value={tmplName}
+                  onChange={(e) => setTmplName(e.target.value)}
+                  className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                  autoFocus
+                />
+              </div>
+              <div>
+                <label className="block text-xs font-medium text-gray-600 mb-1">Description</label>
+                <input
+                  type="text"
+                  value={tmplDesc}
+                  onChange={(e) => setTmplDesc(e.target.value)}
+                  placeholder="Optional description…"
+                  className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                />
+              </div>
+              <div>
+                <label className="block text-xs font-medium text-gray-600 mb-1">Category</label>
+                <input
+                  list="template-categories"
+                  type="text"
+                  value={tmplCategory}
+                  onChange={(e) => setTmplCategory(e.target.value)}
+                  placeholder="e.g. Work, Personal…"
+                  className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                />
+                <datalist id="template-categories">
+                  {[...new Set(templates.map((t) => t.category).filter(Boolean))].map((cat) => (
+                    <option key={cat!} value={cat!} />
+                  ))}
+                </datalist>
+              </div>
+              <div className="text-xs text-gray-400 bg-gray-50 rounded p-2">
+                Captures: title, priority{templateSourceTodo.is_recurring ? ', recurrence' : ''}{templateSourceTodo.reminder_minutes ? ', reminder' : ''}{templateSourceTodo.subtasks.length > 0 ? `, ${templateSourceTodo.subtasks.length} subtask(s)` : ''}
+              </div>
+            </div>
+            <div className="flex gap-3 mt-4">
+              <button
+                onClick={handleSaveTemplate}
+                disabled={!tmplName.trim()}
+                className="flex-1 py-2 bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white text-sm rounded-lg transition-colors"
+              >
+                Save Template
+              </button>
+              <button
+                onClick={() => setShowSaveTemplate(false)}
+                className="px-4 py-2 border border-gray-300 text-gray-600 hover:bg-gray-50 text-sm rounded-lg"
+              >
+                Cancel
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ------------------------------------------------------------------ */}
+      {/* Use Template Modal                                                  */}
+      {/* ------------------------------------------------------------------ */}
+      {showUseTemplate && (
+        <div
+          className="fixed inset-0 bg-black/40 flex items-center justify-center z-50 p-4"
+          onClick={(e) => { if (e.target === e.currentTarget) setShowUseTemplate(false); }}
+        >
+          <div className="bg-white rounded-xl shadow-xl w-full max-w-lg p-6 max-h-[80vh] flex flex-col">
+            <div className="flex items-center justify-between mb-4">
+              <h2 className="text-lg font-semibold text-gray-800">Use Template</h2>
+              <button onClick={() => setShowUseTemplate(false)} className="text-gray-400 hover:text-gray-600 text-xl">✕</button>
+            </div>
+
+            {/* Category filter */}
+            {templates.length > 0 && (
+              <div className="mb-3">
+                <select
+                  value={tmplCategoryFilter}
+                  onChange={(e) => setTmplCategoryFilter(e.target.value)}
+                  className="px-3 py-1.5 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 bg-white"
+                >
+                  <option value="">All Categories</option>
+                  {[...new Set(templates.map((t) => t.category).filter(Boolean))].map((cat) => (
+                    <option key={cat!} value={cat!}>{cat}</option>
+                  ))}
+                </select>
+              </div>
+            )}
+
+            <div className="overflow-y-auto flex-1 space-y-2">
+              {templates.length === 0 && (
+                <p className="text-sm text-gray-400 text-center py-8">No templates yet. Save a todo as a template first.</p>
+              )}
+              {templates
+                .filter((t) => !tmplCategoryFilter || t.category === tmplCategoryFilter)
+                .map((tmpl) => {
+                  const subtaskCount = (() => { try { return (JSON.parse(tmpl.subtasks_json ?? '[]') as unknown[]).length; } catch { return 0; } })();
+                  return (
+                    <div key={tmpl.id} className="p-3 border border-gray-200 rounded-lg hover:border-blue-300 transition-colors">
+                      <div className="flex items-start justify-between gap-2">
+                        <div className="flex-1 min-w-0">
+                          <div className="flex items-center gap-2 flex-wrap">
+                            <p className="text-sm font-medium text-gray-800">{tmpl.name}</p>
+                            {tmpl.category && (
+                              <span className="px-1.5 py-0.5 bg-gray-100 text-gray-500 text-xs rounded">{tmpl.category}</span>
+                            )}
+                          </div>
+                          <p className="text-xs text-gray-500 mt-0.5">
+                            {tmpl.title} &middot; <span className={`font-medium ${tmpl.priority === 'high' ? 'text-red-500' : tmpl.priority === 'low' ? 'text-blue-500' : 'text-yellow-600'}`}>{tmpl.priority}</span>
+                            {tmpl.is_recurring && ` · 🔄 ${tmpl.recurrence_pattern}`}
+                            {subtaskCount > 0 && ` · ${subtaskCount} subtask${subtaskCount > 1 ? 's' : ''}`}
+                            {tmpl.reminder_minutes && ` · 🔔 ${REMINDER_OPTIONS.find(o => o.value === tmpl.reminder_minutes)?.label ?? `${tmpl.reminder_minutes}m`}`}
+                          </p>
+                          {tmpl.due_date_offset_days != null && (
+                            <p className="text-xs text-gray-400">Due +{tmpl.due_date_offset_days} day(s) from today</p>
+                          )}
+                        </div>
+                        <div className="flex gap-1 flex-shrink-0">
+                          <button
+                            onClick={() => handleUseTemplate(tmpl.id)}
+                            className="px-3 py-1 bg-blue-600 hover:bg-blue-700 text-white text-xs rounded-lg transition-colors"
+                          >
+                            Use
+                          </button>
+                          <button
+                            onClick={() => setDeletingTemplateId(tmpl.id)}
+                            className="p-1 text-gray-400 hover:text-red-500 transition-colors"
+                            aria-label="Delete template"
+                          >
+                            🗑️
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+                  );
+                })}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Template delete confirmation */}
+      {deletingTemplateId !== null && (
+        <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-[60] p-4">
+          <div className="bg-white rounded-xl shadow-xl w-full max-w-sm p-6">
+            <h2 className="text-lg font-semibold text-gray-800 mb-2">Delete this template?</h2>
+            <p className="text-sm text-gray-500 mb-5">Todos created from it are not affected.</p>
+            <div className="flex gap-3">
+              <button
+                onClick={() => handleDeleteTemplate(deletingTemplateId)}
+                className="flex-1 py-2 bg-red-600 hover:bg-red-700 text-white text-sm rounded-lg"
+              >
+                Yes, delete
+              </button>
+              <button
+                onClick={() => setDeletingTemplateId(null)}
+                className="px-4 py-2 border border-gray-300 text-gray-600 text-sm rounded-lg"
+              >
+                Cancel
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ------------------------------------------------------------------ */}
+      {/* Manage Tags Modal                                                   */}
+      {/* ------------------------------------------------------------------ */}
+      {showManageTags && (
+        <div
+          className="fixed inset-0 bg-black/40 flex items-center justify-center z-50 p-4"
+          onClick={(e) => { if (e.target === e.currentTarget) setShowManageTags(false); }}
+        >
+          <div className="bg-white rounded-xl shadow-xl w-full max-w-md p-6 max-h-[80vh] overflow-y-auto">
+            <div className="flex items-center justify-between mb-4">
+              <h2 className="text-lg font-semibold text-gray-800">Manage Tags</h2>
+              <button onClick={() => setShowManageTags(false)} className="text-gray-400 hover:text-gray-600 text-xl leading-none">✕</button>
+            </div>
+
+            {/* Create tag form */}
+            <div className="mb-4 p-3 bg-gray-50 rounded-lg">
+              <p className="text-xs font-medium text-gray-600 mb-2">New Tag</p>
+              {tagFormError && (
+                <p className="text-xs text-red-600 mb-2">{tagFormError}</p>
+              )}
+              <div className="flex gap-2">
+                <input
+                  type="text"
+                  value={newTagName}
+                  onChange={(e) => setNewTagName(e.target.value)}
+                  onKeyDown={(e) => e.key === 'Enter' && handleCreateTag()}
+                  placeholder="Tag name…"
+                  maxLength={50}
+                  className="flex-1 px-2 py-1.5 border border-gray-300 rounded text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                />
+                <input
+                  type="color"
+                  value={newTagColor}
+                  onChange={(e) => setNewTagColor(e.target.value)}
+                  className="w-9 h-9 rounded cursor-pointer border border-gray-300 p-0.5"
+                  title="Pick colour"
+                />
+                <button
+                  onClick={handleCreateTag}
+                  className="px-3 py-1.5 bg-blue-600 hover:bg-blue-700 text-white text-xs rounded transition-colors"
+                >
+                  Create
+                </button>
+              </div>
+              <div className="flex gap-1.5 mt-2">
+                {PRESET_COLORS.map((c) => (
+                  <button
+                    key={c}
+                    type="button"
+                    onClick={() => setNewTagColor(c)}
+                    className={`w-5 h-5 rounded-full border-2 transition-transform hover:scale-110 ${newTagColor === c ? 'border-gray-800 scale-110' : 'border-transparent'}`}
+                    style={{ backgroundColor: c }}
+                    title={c}
+                  />
+                ))}
+              </div>
+            </div>
+
+            {/* Existing tags */}
+            {allTags.length === 0 && (
+              <p className="text-sm text-gray-400 text-center py-4">No tags yet.</p>
+            )}
+            <ul className="space-y-2">
+              {allTags.map((tag) => (
+                <li key={tag.id} className="flex items-center gap-2 p-2 rounded-lg border border-gray-100">
+                  {editingTag?.id === tag.id ? (
+                    <>
+                      <input
+                        type="color"
+                        value={editTagColor}
+                        onChange={(e) => setEditTagColor(e.target.value)}
+                        className="w-7 h-7 rounded cursor-pointer border border-gray-300 p-0.5 flex-shrink-0"
+                      />
+                      <input
+                        type="text"
+                        value={editTagName}
+                        onChange={(e) => setEditTagName(e.target.value)}
+                        onKeyDown={(e) => e.key === 'Enter' && handleUpdateTag(tag.id)}
+                        className="flex-1 px-2 py-1 border border-gray-300 rounded text-sm focus:outline-none focus:ring-1 focus:ring-blue-500"
+                        autoFocus
+                      />
+                      <button onClick={() => handleUpdateTag(tag.id)} className="text-xs text-green-600 hover:text-green-800 font-medium">Save</button>
+                      <button onClick={() => setEditingTag(null)} className="text-xs text-gray-400 hover:text-gray-600">Cancel</button>
+                    </>
+                  ) : (
+                    <>
+                      <span className="w-3 h-3 rounded-full flex-shrink-0" style={{ backgroundColor: tag.color }} />
+                      <span className="flex-1 text-sm text-gray-700">{tag.name}</span>
+                      <button
+                        onClick={() => { setEditingTag(tag); setEditTagName(tag.name); setEditTagColor(tag.color); }}
+                        className="text-gray-400 hover:text-blue-500 transition-colors p-1"
+                        aria-label="Edit tag"
+                      >✏️</button>
+                      <button
+                        onClick={() => handleDeleteTag(tag.id)}
+                        className="text-gray-400 hover:text-red-500 transition-colors p-1"
+                        aria-label="Delete tag"
+                      >🗑️</button>
+                    </>
+                  )}
+                </li>
+              ))}
+            </ul>
           </div>
         </div>
       )}
@@ -966,6 +1711,20 @@ export default function HomePage() {
               </button>
             </div>
           </div>
+        </div>
+      )}
+
+      {/* Toast notification */}
+      {toast && (
+        <div
+          className={`fixed bottom-5 right-5 z-[70] flex items-center gap-3 px-4 py-3 rounded-lg shadow-lg text-sm font-medium transition-all ${
+            toast.type === 'success'
+              ? 'bg-green-600 text-white'
+              : 'bg-red-600 text-white'
+          }`}
+        >
+          <span>{toast.type === 'success' ? '✅' : '❌'} {toast.message}</span>
+          <button onClick={() => setToast(null)} className="opacity-70 hover:opacity-100" aria-label="Dismiss">✕</button>
         </div>
       )}
     </div>
