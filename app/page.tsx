@@ -841,14 +841,14 @@ export default function HomePage() {
     })();
 
     return (
-      <li className={`flex flex-col p-3 rounded-lg border ${accent} bg-white`}>
+      <li className={`flex flex-col p-4 rounded-2xl border ${accent} bg-white shadow-sm hover:shadow-md`}>
         <div className="flex items-start gap-3">
           <button
             onClick={() => handleToggle(todo)}
-            className={`mt-0.5 w-5 h-5 flex-shrink-0 rounded border-2 flex items-center justify-center transition-colors ${
+            className={`mt-0.5 w-5 h-5 flex-shrink-0 rounded-md border-2 flex items-center justify-center ${
               todo.completed
                 ? 'bg-green-500 border-green-500 text-white'
-                : 'border-gray-400 hover:border-blue-500'
+                : 'border-gray-300 hover:border-blue-500'
             }`}
             aria-label={todo.completed ? 'Mark incomplete' : 'Mark complete'}
           >
@@ -861,32 +861,33 @@ export default function HomePage() {
 
           <div className="flex-1 min-w-0">
             <div className="flex items-center gap-2 flex-wrap">
-              <p className={`text-sm font-medium break-words ${todo.completed ? 'line-through text-gray-400' : 'text-gray-800'}`}>
+              <p className={`text-sm font-semibold break-words ${todo.completed ? 'line-through text-gray-400' : 'text-gray-800'}`}>
                 {todo.title}
               </p>
               <PriorityBadge priority={todo.priority} />
             </div>
             {todo.description && (
-              <p className="text-xs text-gray-500 mt-0.5 break-words">{todo.description}</p>
+              <p className="text-xs text-gray-500 mt-1 break-words leading-relaxed">{todo.description}</p>
             )}
             {todo.due_date && (
-              <p className={`text-xs mt-0.5 ${isSingaporeOverdue(todo) ? 'text-red-500 font-medium' : 'text-gray-400'}`}>
-                Due: {formatDueDate(todo.due_date)}
+              <p className={`text-xs mt-1 flex items-center gap-1 ${isSingaporeOverdue(todo) ? 'text-red-500 font-medium' : 'text-gray-400'}`}>
+                <span>📅</span> {formatDueDate(todo.due_date)}
+                {isSingaporeOverdue(todo) && <span className="text-red-400">(overdue)</span>}
               </p>
             )}
             {todo.is_recurring && (
-              <p className="text-xs text-gray-400 mt-0.5">
-                🔄 {todo.recurrence_pattern}
+              <p className="text-xs text-indigo-400 mt-0.5 flex items-center gap-1">
+                🔄 <span className="capitalize">{todo.recurrence_pattern}</span>
               </p>
             )}
             {todo.reminder_minutes !== null && todo.reminder_minutes !== undefined && (
-              <p className="text-xs text-gray-400 mt-0.5">
+              <p className="text-xs text-amber-500 mt-0.5">
                 🔔 {REMINDER_OPTIONS.find(o => o.value === todo.reminder_minutes)?.label ?? `${todo.reminder_minutes}m before`}
               </p>
             )}
             {/* Tag badges */}
             {todo.tags.length > 0 && (
-              <div className="flex flex-wrap gap-1 mt-1">
+              <div className="flex flex-wrap gap-1 mt-1.5">
                 {todo.tags.map((tag) => (
                   <TagBadge key={tag.id} tag={tag} onClick={() => setActiveTagFilter(tag)} />
                 ))}
@@ -894,10 +895,10 @@ export default function HomePage() {
             )}
             {/* Collapsed progress bar */}
             {total > 0 && !isExpanded && (
-              <div className="mt-1.5">
-                <div className="w-full bg-gray-200 rounded-full h-1.5">
+              <div className="mt-2">
+                <div className="w-full bg-gray-100 rounded-full h-1.5">
                   <div
-                    className={`h-1.5 rounded-full transition-all ${percent === 100 ? 'bg-green-500' : 'bg-blue-500'}`}
+                    className={`h-1.5 rounded-full ${percent === 100 ? 'bg-green-400' : 'bg-blue-400'}`}
                     style={{ width: `${percent}%` }}
                   />
                 </div>
@@ -905,10 +906,10 @@ export default function HomePage() {
             )}
           </div>
 
-          <div className="flex gap-1 flex-shrink-0">
+          <div className="flex gap-0.5 flex-shrink-0">
             <button
               onClick={() => openSaveAsTemplate(todo)}
-              className="p-1.5 rounded hover:bg-gray-100 text-gray-400 hover:text-green-500 transition-colors"
+              className="p-1.5 rounded-lg hover:bg-gray-100 text-gray-300 hover:text-green-500"
               aria-label="Save as template"
               title="Save as Template"
             >
@@ -916,14 +917,14 @@ export default function HomePage() {
             </button>
             <button
               onClick={() => openEditModal(todo)}
-              className="p-1.5 rounded hover:bg-gray-100 text-gray-400 hover:text-blue-500 transition-colors"
+              className="p-1.5 rounded-lg hover:bg-gray-100 text-gray-300 hover:text-blue-500"
               aria-label="Edit todo"
             >
               ✏️
             </button>
             <button
               onClick={() => setDeletingId(todo.id)}
-              className="p-1.5 rounded hover:bg-gray-100 text-gray-400 hover:text-red-500 transition-colors"
+              className="p-1.5 rounded-lg hover:bg-gray-100 text-gray-300 hover:text-red-500"
               aria-label="Delete todo"
             >
               🗑️
@@ -1031,10 +1032,12 @@ export default function HomePage() {
   }) {
     if (items.length === 0) return null;
     return (
-      <section className="mb-6">
-        <h2 className="text-sm font-semibold text-gray-500 uppercase tracking-wide mb-2">
-          {icon} {label} ({items.length})
-        </h2>
+      <section className="mb-8">
+        <div className="flex items-center gap-2 mb-3">
+          <span className="text-base">{icon}</span>
+          <h2 className="text-xs font-bold text-gray-500 uppercase tracking-widest">{label}</h2>
+          <span className="ml-1 px-1.5 py-0.5 bg-gray-100 text-gray-500 text-xs rounded-full font-medium">{items.length}</span>
+        </div>
         <ul className="space-y-2">
           {items.map((t) => (
             <TodoItem key={t.id} todo={t} accent={accent} />
@@ -1051,7 +1054,10 @@ export default function HomePage() {
   if (!isAuthenticated && loading) {
     return (
       <div className="flex items-center justify-center min-h-screen">
-        <p className="text-gray-500">Loading…</p>
+        <div className="flex flex-col items-center gap-3">
+          <div className="w-10 h-10 border-2 border-blue-200 border-t-blue-500 rounded-full animate-spin" />
+          <p className="text-gray-400 text-sm">Loading…</p>
+        </div>
       </div>
     );
   }
@@ -1067,10 +1073,17 @@ export default function HomePage() {
   return (
     <div className="max-w-2xl mx-auto px-4 py-8">
       {/* Header */}
-      <div className="flex items-center justify-between mb-4">
-        <div className="flex items-center gap-4">
-          <h1 className="text-2xl font-bold text-gray-800">My Todos</h1>
-          <Link href="/calendar" className="text-sm text-blue-600 hover:underline">📅 Calendar</Link>
+      <div className="flex items-center justify-between mb-6">
+        <div className="flex items-center gap-3">
+          <div className="w-9 h-9 bg-gradient-to-br from-blue-500 to-indigo-600 rounded-xl flex items-center justify-center shadow-md shadow-blue-200 flex-shrink-0">
+            <span className="text-white text-base font-bold">✓</span>
+          </div>
+          <div>
+            <h1 className="text-xl font-bold text-gray-900 leading-tight">My Todos</h1>
+            <Link href="/calendar" className="text-xs text-blue-500 hover:text-blue-700">
+              📅 Calendar view
+            </Link>
+          </div>
         </div>
         <div className="flex items-center gap-3">
           {currentUser && (
@@ -1078,48 +1091,48 @@ export default function HomePage() {
           )}
           <button
             onClick={handleLogout}
-            className="text-xs text-gray-500 hover:text-red-500 border border-gray-300 px-3 py-1.5 rounded-lg hover:border-red-300 transition-colors"
+            className="text-xs text-gray-500 hover:text-red-500 border border-gray-200 hover:border-red-200 px-3 py-1.5 rounded-lg hover:bg-red-50"
           >
-            Logout
+            Sign out
           </button>
           <button
             onClick={openCreateModal}
-            className="flex items-center gap-2 px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white text-sm font-medium rounded-lg transition-colors"
+            className="flex items-center gap-1.5 px-4 py-2 bg-gradient-to-r from-blue-500 to-blue-600 hover:from-blue-600 hover:to-blue-700 text-white text-sm font-semibold rounded-xl shadow-md shadow-blue-200 hover:shadow-blue-300 hover:-translate-y-0.5"
           >
-            + New Todo
+            <span className="text-base leading-none">+</span> New Todo
           </button>
         </div>
       </div>
 
       {/* Search */}
-      <div className="relative mb-4">
+      <div className="relative mb-3">
         <input
           type="search"
           value={rawSearch}
           onChange={(e) => setRawSearch(e.target.value)}
-          placeholder="Search todos…"
+          placeholder="Search todos and tags…"
           aria-label="Search todos"
-          className="w-full pl-9 pr-9 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+          className="w-full pl-10 pr-9 py-2.5 bg-white border border-gray-200 rounded-xl text-sm text-gray-700 placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent shadow-sm"
         />
-        <span className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400 pointer-events-none">🔍</span>
+        <span className="absolute left-3.5 top-1/2 -translate-y-1/2 text-gray-400 pointer-events-none">🔍</span>
         {rawSearch && (
           <button
             onClick={() => setRawSearch('')}
-            className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600"
+            className="absolute right-3 top-1/2 -translate-y-1/2 w-5 h-5 flex items-center justify-center text-gray-400 hover:text-gray-600 bg-gray-100 hover:bg-gray-200 rounded-full text-xs"
             aria-label="Clear search"
           >✕</button>
         )}
       </div>
 
       {/* Toolbar */}
-      <div className="flex items-center gap-3 mb-3 flex-wrap">
+      <div className="flex items-center gap-2 mb-4 flex-wrap">
         <label htmlFor="priority-filter" className="sr-only">Filter by priority</label>
         <select
           id="priority-filter"
           aria-label="Filter by priority"
           value={priorityFilter}
           onChange={(e) => setPriorityFilter(e.target.value as Priority | 'all')}
-          className="px-3 py-1.5 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 bg-white"
+          className="px-3 py-1.5 bg-white border border-gray-200 rounded-lg text-xs text-gray-600 focus:outline-none focus:ring-2 focus:ring-blue-500 shadow-sm"
         >
           <option value="all">All Priorities</option>
           <option value="high">🔴 High</option>
@@ -1129,31 +1142,31 @@ export default function HomePage() {
         {supported && permission !== 'granted' && (
           <button
             onClick={requestPermission}
-            className="flex items-center gap-1 px-3 py-1.5 bg-yellow-50 border border-yellow-300 text-yellow-800 text-xs rounded-lg hover:bg-yellow-100 transition-colors"
+            className="flex items-center gap-1 px-3 py-1.5 bg-amber-50 border border-amber-200 text-amber-700 text-xs rounded-lg hover:bg-amber-100"
           >
-            🔔 Enable Notifications
+            🔔 Notifications
           </button>
         )}
         <button
           onClick={() => setShowManageTags(true)}
-          className="flex items-center gap-1 px-3 py-1.5 bg-gray-50 border border-gray-300 text-gray-600 text-xs rounded-lg hover:bg-gray-100 transition-colors"
+          className="flex items-center gap-1 px-3 py-1.5 bg-white border border-gray-200 text-gray-600 text-xs rounded-lg hover:bg-gray-50 shadow-sm"
         >
-          🏷️ Manage Tags
+          🏷️ Tags
         </button>
         <button
           onClick={() => setShowUseTemplate(true)}
-          className="flex items-center gap-1 px-3 py-1.5 bg-gray-50 border border-gray-300 text-gray-600 text-xs rounded-lg hover:bg-gray-100 transition-colors"
+          className="flex items-center gap-1 px-3 py-1.5 bg-white border border-gray-200 text-gray-600 text-xs rounded-lg hover:bg-gray-50 shadow-sm"
         >
-          📋 Use Template
+          📋 Templates
         </button>
         <button
           onClick={handleExport}
           disabled={isExporting}
-          className="flex items-center gap-1 px-3 py-1.5 bg-gray-50 border border-gray-300 text-gray-600 text-xs rounded-lg hover:bg-gray-100 disabled:opacity-50 transition-colors"
+          className="flex items-center gap-1 px-3 py-1.5 bg-white border border-gray-200 text-gray-600 text-xs rounded-lg hover:bg-gray-50 disabled:opacity-50 shadow-sm"
         >
           {isExporting ? 'Exporting…' : '⬇️ Export'}
         </button>
-        <label className="flex items-center gap-1 px-3 py-1.5 bg-gray-50 border border-gray-300 text-gray-600 text-xs rounded-lg hover:bg-gray-100 cursor-pointer transition-colors">
+        <label className="flex items-center gap-1 px-3 py-1.5 bg-white border border-gray-200 text-gray-600 text-xs rounded-lg hover:bg-gray-50 cursor-pointer shadow-sm">
           ⬆️ Import
           <input
             type="file"
@@ -1175,20 +1188,20 @@ export default function HomePage() {
             </span>
           )}
           {priorityFilter !== 'all' && (
-            <span className="flex items-center gap-1 px-2 py-0.5 bg-white border border-blue-200 text-blue-700 text-xs rounded-full">
-              Priority: {priorityFilter}
+            <span className="flex items-center gap-1 px-2 py-0.5 bg-white border border-blue-200 text-blue-700 text-xs rounded-full shadow-sm">
+              {priorityFilter}
               <button onClick={() => setPriorityFilter('all')} className="ml-1 hover:text-red-500" aria-label="Clear priority filter">✕</button>
             </span>
           )}
           {activeTagFilter && (
-            <span className="flex items-center gap-1 px-2 py-0.5 bg-white text-xs rounded-full border" style={{ borderColor: activeTagFilter.color }}>
-              Tag: <TagBadge tag={activeTagFilter} />
-              <button onClick={() => setActiveTagFilter(null)} className="ml-1 text-gray-400 hover:text-red-500" aria-label="Clear tag filter">✕</button>
+            <span className="flex items-center gap-1 px-2 py-0.5 bg-white text-xs rounded-full border shadow-sm" style={{ borderColor: activeTagFilter.color }}>
+              <TagBadge tag={activeTagFilter} />
+              <button onClick={() => setActiveTagFilter(null)} className="ml-0.5 text-gray-400 hover:text-red-500" aria-label="Clear tag filter">✕</button>
             </span>
           )}
           <button
             onClick={clearAllFilters}
-            className="text-xs text-red-500 hover:text-red-700 hover:underline ml-auto"
+            className="text-xs text-red-400 hover:text-red-600 ml-auto font-medium"
           >
             Clear all
           </button>
@@ -1197,35 +1210,49 @@ export default function HomePage() {
 
       {/* Global error */}
       {error && (
-        <div className="mb-4 p-3 bg-red-50 border border-red-200 text-red-600 text-sm rounded-lg">
-          {error}
-          <button onClick={() => setError(null)} className="ml-2 underline">dismiss</button>
+        <div className="mb-4 flex items-start gap-2 p-3 bg-red-50 border border-red-100 text-red-600 text-sm rounded-xl">
+          <span className="flex-shrink-0">❌</span>
+          <span className="flex-1">{error}</span>
+          <button onClick={() => setError(null)} className="flex-shrink-0 text-xs underline opacity-70 hover:opacity-100">dismiss</button>
         </div>
       )}
 
       {/* Loading */}
       {loading && (
-        <p className="text-gray-400 text-sm text-center py-8">Loading todos…</p>
+        <div className="flex items-center justify-center py-16">
+          <div className="flex flex-col items-center gap-3">
+            <div className="w-8 h-8 border-2 border-blue-200 border-t-blue-500 rounded-full animate-spin" />
+            <p className="text-gray-400 text-sm">Loading todos…</p>
+          </div>
+        </div>
       )}
 
       {/* Empty state — no todos at all */}
       {!loading && todos.length === 0 && (
-        <div className="text-center py-16">
-          <p className="text-gray-400 text-lg">No todos yet.</p>
+        <div className="text-center py-20">
+          <div className="w-16 h-16 bg-gradient-to-br from-blue-100 to-indigo-100 rounded-2xl flex items-center justify-center mx-auto mb-4">
+            <span className="text-3xl">📝</span>
+          </div>
+          <p className="text-gray-500 font-medium mb-1">No todos yet</p>
+          <p className="text-gray-400 text-sm mb-4">Create your first todo to get started</p>
           <button
             onClick={openCreateModal}
-            className="mt-3 text-blue-500 underline text-sm"
+            className="inline-flex items-center gap-1.5 px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white text-sm font-medium rounded-lg"
           >
-            Create your first todo
+            + Create a todo
           </button>
         </div>
       )}
 
       {/* Empty state — filters active but no results */}
       {!loading && todos.length > 0 && visibleTodos.length === 0 && (
-        <div className="text-center py-12">
-          <p className="text-gray-400 text-lg">No todos match your filters.</p>
-          <button onClick={clearAllFilters} className="mt-2 text-blue-500 underline text-sm">
+        <div className="text-center py-16">
+          <div className="w-14 h-14 bg-gray-100 rounded-2xl flex items-center justify-center mx-auto mb-3">
+            <span className="text-2xl">🔍</span>
+          </div>
+          <p className="text-gray-500 font-medium mb-1">No results</p>
+          <p className="text-gray-400 text-sm mb-3">No todos match your current filters</p>
+          <button onClick={clearAllFilters} className="text-blue-500 hover:text-blue-700 text-sm font-medium">
             Clear filters
           </button>
         </div>
@@ -1250,8 +1277,8 @@ export default function HomePage() {
             if (e.target === e.currentTarget) closeModal();
           }}
         >
-          <div className="bg-white rounded-xl shadow-xl w-full max-w-md p-6">
-            <h2 className="text-lg font-semibold text-gray-800 mb-4">
+          <div className="bg-white rounded-2xl shadow-2xl shadow-blue-100/50 w-full max-w-md p-6 border border-gray-100">
+            <h2 className="text-lg font-bold text-gray-800 mb-4">
               {editingTodo ? 'Edit Todo' : 'New Todo'}
             </h2>
 
