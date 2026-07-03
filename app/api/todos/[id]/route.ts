@@ -1,9 +1,11 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getSession } from '@/lib/auth';
-import { todoDB, type Priority } from '@/lib/db';
+import { todoDB, type Priority, type RecurrencePattern } from '@/lib/db';
 import { isFutureDate } from '@/lib/timezone';
+import { calculateNextDueDate } from '@/lib/recurrence';
 
 const VALID_PRIORITIES: Priority[] = ['high', 'medium', 'low'];
+const VALID_PATTERNS: RecurrencePattern[] = ['daily', 'weekly', 'monthly', 'yearly'];
 
 type Params = Promise<{ id: string }>;
 
@@ -47,6 +49,8 @@ export async function PUT(request: NextRequest, { params }: { params: Params }) 
     completed?: unknown;
     due_date?: unknown;
     priority?: unknown;
+    is_recurring?: unknown;
+    recurrence_pattern?: unknown;
   };
   try {
     body = await request.json();
@@ -98,6 +102,8 @@ export async function PUT(request: NextRequest, { params }: { params: Params }) 
     completed?: boolean;
     due_date?: string | null;
     priority?: Priority;
+    is_recurring?: boolean;
+    recurrence_pattern?: RecurrencePattern | null;
   } = {};
 
   if (body.title !== undefined) input.title = String(body.title).trim();
@@ -113,13 +119,57 @@ export async function PUT(request: NextRequest, { params }: { params: Params }) 
     }
     input.priority = body.priority as Priority;
   }
+  if (body.is_recurring !== undefined) {
+    input.is_recurring = body.is_recurring === true || body.is_recurring === 1;
+  }
+  if (body.recurrence_pattern !== undefined) {
+    if (
+      body.recurrence_pattern !== null &&
+      (typeof body.recurrence_pattern !== 'string' ||
+        !VALID_PATTERNS.includes(body.recurrence_pattern as RecurrencePattern))
+    ) {
+      return NextResponse.json({ error: 'Invalid recurrence pattern' }, { status: 400 });
+    }
+    input.recurrence_pattern =
+      body.recurrence_pattern === null ? null : (body.recurrence_pattern as RecurrencePattern);
+  }
+
+  // Validate recurrence consistency
+  const willBeRecurring =
+    input.is_recurring !== undefined ? input.is_recurring : false;
+  const existingTodo = todoDB.getById(session.userId, todoId);
+  if (!existingTodo) {
+    return NextResponse.json({ error: 'Todo not found' }, { status: 404 });
+  }
+  const effectiveRecurring =
+    input.is_recurring !== undefined ? input.is_recurring : existingTodo.is_recurring;
+  const effectiveDueDate =
+    input.due_date !== undefined ? input.due_date : existingTodo.due_date;
+  if (effectiveRecurring && !effectiveDueDate) {
+    return NextResponse.json({ error: 'Recurring todos require a due date' }, { status: 400 });
+  }
+  void willBeRecurring; // suppress unused var warning
 
   const updated = todoDB.update(session.userId, todoId, input);
   if (!updated) {
     return NextResponse.json({ error: 'Todo not found' }, { status: 404 });
   }
 
-  return NextResponse.json(updated);
+  // Spawn next instance when completing a recurring todo
+  let nextTodo = null;
+  if (input.completed === true && updated.is_recurring && updated.recurrence_pattern && updated.due_date) {
+    const nextDueDate = calculateNextDueDate(updated.due_date, updated.recurrence_pattern);
+    nextTodo = todoDB.create(session.userId, {
+      title: updated.title,
+      description: updated.description ?? undefined,
+      priority: updated.priority,
+      due_date: nextDueDate,
+      is_recurring: true,
+      recurrence_pattern: updated.recurrence_pattern,
+    });
+  }
+
+  return NextResponse.json({ todo: updated, nextTodo });
 }
 
 // DELETE /api/todos/[id] — delete a todo

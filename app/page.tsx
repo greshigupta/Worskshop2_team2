@@ -7,6 +7,7 @@ import { useState, useEffect, useCallback } from 'react';
 // ---------------------------------------------------------------------------
 
 type Priority = 'high' | 'medium' | 'low';
+type RecurrencePattern = 'daily' | 'weekly' | 'monthly' | 'yearly';
 
 interface Todo {
   id: number;
@@ -16,6 +17,8 @@ interface Todo {
   completed: boolean;
   due_date?: string | null;
   priority: Priority;
+  is_recurring: boolean;
+  recurrence_pattern: RecurrencePattern | null;
   created_at: string;
   updated_at: string;
 }
@@ -25,9 +28,18 @@ interface FormState {
   description: string;
   due_date: string;
   priority: Priority;
+  is_recurring: boolean;
+  recurrence_pattern: RecurrencePattern;
 }
 
-const EMPTY_FORM: FormState = { title: '', description: '', due_date: '', priority: 'medium' };
+const EMPTY_FORM: FormState = {
+  title: '',
+  description: '',
+  due_date: '',
+  priority: 'medium',
+  is_recurring: false,
+  recurrence_pattern: 'daily',
+};
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -178,6 +190,8 @@ export default function HomePage() {
         ? new Date(todo.due_date).toISOString().slice(0, 16)
         : '',
       priority: todo.priority,
+      is_recurring: todo.is_recurring,
+      recurrence_pattern: todo.recurrence_pattern ?? 'daily',
     });
     setFormError(null);
     setShowModal(true);
@@ -208,6 +222,11 @@ export default function HomePage() {
       return;
     }
 
+    if (form.is_recurring && !form.due_date) {
+      setFormError('Due date is required for recurring todos.');
+      return;
+    }
+
     const body: Record<string, unknown> = {
       title,
       description: form.description.trim() || undefined,
@@ -215,6 +234,8 @@ export default function HomePage() {
         ? new Date(form.due_date).toISOString()
         : undefined,
       priority: form.priority,
+      is_recurring: form.is_recurring,
+      recurrence_pattern: form.is_recurring ? form.recurrence_pattern : null,
     };
 
     setSubmitting(true);
@@ -247,8 +268,11 @@ export default function HomePage() {
           setSubmitting(false);
           return;
         }
-        const updated: Todo = await res.json();
-        setTodos((prev) => prev.map((t) => (t.id === updated.id ? updated : t)));
+        const { todo: updated, nextTodo }: { todo: Todo; nextTodo: Todo | null } = await res.json();
+        setTodos((prev) => {
+          const replaced = prev.map((t) => (t.id === updated.id ? updated : t));
+          return nextTodo ? [nextTodo, ...replaced] : replaced;
+        });
         closeModal();
       } catch {
         setFormError('Network error. Please try again.');
@@ -265,6 +289,8 @@ export default function HomePage() {
         completed: false,
         due_date: (body.due_date as string) ?? null,
         priority: form.priority,
+        is_recurring: form.is_recurring,
+        recurrence_pattern: form.is_recurring ? form.recurrence_pattern : null,
         created_at: new Date().toISOString(),
         updated_at: new Date().toISOString(),
       };
@@ -317,8 +343,11 @@ export default function HomePage() {
           prev.map((t) => (t.id === todo.id ? { ...t, completed: todo.completed } : t)),
         );
       } else {
-        const updated: Todo = await res.json();
-        setTodos((prev) => prev.map((t) => (t.id === updated.id ? updated : t)));
+        const { todo: updated, nextTodo }: { todo: Todo; nextTodo: Todo | null } = await res.json();
+        setTodos((prev) => {
+          const replaced = prev.map((t) => (t.id === updated.id ? updated : t));
+          return nextTodo ? [nextTodo, ...replaced] : replaced;
+        });
       }
     } catch {
       setTodos((prev) =>
@@ -384,6 +413,11 @@ export default function HomePage() {
           {todo.due_date && (
             <p className={`text-xs mt-0.5 ${isSingaporeOverdue(todo) ? 'text-red-500 font-medium' : 'text-gray-400'}`}>
               Due: {formatDueDate(todo.due_date)}
+            </p>
+          )}
+          {todo.is_recurring && (
+            <p className="text-xs text-gray-400 mt-0.5">
+              🔄 {todo.recurrence_pattern}
             </p>
           )}
         </div>
@@ -617,6 +651,36 @@ export default function HomePage() {
                   <option value="medium">🟡 Medium</option>
                   <option value="low">🔵 Low</option>
                 </select>
+              </div>
+
+              <div>
+                <label className="flex items-center gap-2 cursor-pointer text-sm font-medium text-gray-700">
+                  <input
+                    type="checkbox"
+                    checked={form.is_recurring}
+                    onChange={(e) => setForm((f) => ({ ...f, is_recurring: e.target.checked }))}
+                    className="w-4 h-4 rounded border-gray-300 text-blue-600"
+                  />
+                  Repeat
+                </label>
+
+                {form.is_recurring && (
+                  <div className="mt-2">
+                    <select
+                      value={form.recurrence_pattern}
+                      onChange={(e) => setForm((f) => ({ ...f, recurrence_pattern: e.target.value as RecurrencePattern }))}
+                      className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 bg-white"
+                    >
+                      <option value="daily">Daily</option>
+                      <option value="weekly">Weekly</option>
+                      <option value="monthly">Monthly</option>
+                      <option value="yearly">Yearly</option>
+                    </select>
+                    {!form.due_date && (
+                      <p className="text-red-500 text-xs mt-1">Due date required for recurring todos</p>
+                    )}
+                  </div>
+                )}
               </div>
 
               <div className="flex gap-3 pt-1">

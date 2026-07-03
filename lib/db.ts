@@ -46,11 +46,24 @@ try {
   // Column already exists — ignore
 }
 
+// Migration: add recurrence columns (safe to run multiple times)
+try {
+  db.exec(`ALTER TABLE todos ADD COLUMN is_recurring INTEGER NOT NULL DEFAULT 0`);
+} catch {
+  // Column already exists — ignore
+}
+try {
+  db.exec(`ALTER TABLE todos ADD COLUMN recurrence_pattern TEXT`);
+} catch {
+  // Column already exists — ignore
+}
+
 // ---------------------------------------------------------------------------
 // TypeScript interfaces
 // ---------------------------------------------------------------------------
 
 export type Priority = 'high' | 'medium' | 'low';
+export type RecurrencePattern = 'daily' | 'weekly' | 'monthly' | 'yearly';
 
 export interface Todo {
   id: number;
@@ -60,6 +73,8 @@ export interface Todo {
   completed: boolean;
   due_date?: string | null;
   priority: Priority;
+  is_recurring: boolean;
+  recurrence_pattern: RecurrencePattern | null;
   created_at: string;
   updated_at: string;
 }
@@ -69,6 +84,8 @@ export interface CreateTodoInput {
   description?: string;
   due_date?: string;
   priority?: Priority;
+  is_recurring?: boolean;
+  recurrence_pattern?: RecurrencePattern | null;
 }
 
 export interface UpdateTodoInput {
@@ -77,6 +94,8 @@ export interface UpdateTodoInput {
   completed?: boolean;
   due_date?: string | null;
   priority?: Priority;
+  is_recurring?: boolean;
+  recurrence_pattern?: RecurrencePattern | null;
 }
 
 // Raw row returned by better-sqlite3 (completed stored as 0/1)
@@ -88,6 +107,8 @@ interface TodoRow {
   completed: number;
   due_date: string | null;
   priority: string;
+  is_recurring: number;
+  recurrence_pattern: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -97,6 +118,8 @@ function rowToTodo(row: TodoRow): Todo {
     ...row,
     completed: row.completed === 1,
     priority: (row.priority as Priority) ?? 'medium',
+    is_recurring: row.is_recurring === 1,
+    recurrence_pattern: (row.recurrence_pattern as RecurrencePattern | null) ?? null,
   };
 }
 
@@ -105,9 +128,9 @@ function rowToTodo(row: TodoRow): Todo {
 // ---------------------------------------------------------------------------
 
 const stmts = {
-  insert: db.prepare<[number, string, string | null, string | null, string, string, string]>(`
-    INSERT INTO todos (user_id, title, description, due_date, priority, created_at, updated_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?)
+  insert: db.prepare<[number, string, string | null, string | null, string, number, string | null, string, string]>(`
+    INSERT INTO todos (user_id, title, description, due_date, priority, is_recurring, recurrence_pattern, created_at, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
   `),
   selectAll: db.prepare<[number]>(`
     SELECT * FROM todos WHERE user_id = ? ORDER BY created_at DESC
@@ -115,9 +138,10 @@ const stmts = {
   selectById: db.prepare<[number, number]>(`
     SELECT * FROM todos WHERE id = ? AND user_id = ?
   `),
-  updateFull: db.prepare<[string, string | null, number, string | null, string, string, number, number]>(`
+  updateFull: db.prepare<[string, string | null, number, string | null, string, number, string | null, string, number, number]>(`
     UPDATE todos
-    SET title = ?, description = ?, completed = ?, due_date = ?, priority = ?, updated_at = ?
+    SET title = ?, description = ?, completed = ?, due_date = ?, priority = ?,
+        is_recurring = ?, recurrence_pattern = ?, updated_at = ?
     WHERE id = ? AND user_id = ?
   `),
   delete: db.prepare<[number, number]>(`
@@ -133,12 +157,16 @@ export const todoDB = {
   create(userId: number, input: CreateTodoInput): Todo {
     const now = formatSingaporeDate(new Date());
     const priority: Priority = input.priority ?? 'medium';
+    const is_recurring = input.is_recurring ? 1 : 0;
+    const recurrence_pattern = input.recurrence_pattern ?? null;
     const result = stmts.insert.run(
       userId,
       input.title.trim(),
       input.description?.trim() ?? null,
       input.due_date ?? null,
       priority,
+      is_recurring,
+      recurrence_pattern,
       now,
       now,
     );
@@ -168,8 +196,11 @@ export const todoDB = {
     const completed = input.completed !== undefined ? (input.completed ? 1 : 0) : (existing.completed ? 1 : 0);
     const due_date = input.due_date !== undefined ? (input.due_date ?? null) : (existing.due_date ?? null);
     const priority: Priority = input.priority ?? existing.priority;
+    const is_recurring = input.is_recurring !== undefined ? (input.is_recurring ? 1 : 0) : (existing.is_recurring ? 1 : 0);
+    const recurrence_pattern =
+      input.recurrence_pattern !== undefined ? (input.recurrence_pattern ?? null) : existing.recurrence_pattern;
 
-    stmts.updateFull.run(title, description, completed, due_date, priority, now, id, userId);
+    stmts.updateFull.run(title, description, completed, due_date, priority, is_recurring, recurrence_pattern, now, id, userId);
     return rowToTodo(stmts.selectById.get(id, userId) as TodoRow);
   },
 

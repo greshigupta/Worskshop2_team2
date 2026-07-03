@@ -1,9 +1,10 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getSession } from '@/lib/auth';
-import { todoDB, type Priority } from '@/lib/db';
+import { todoDB, type Priority, type RecurrencePattern } from '@/lib/db';
 import { isFutureDate } from '@/lib/timezone';
 
 const VALID_PRIORITIES: Priority[] = ['high', 'medium', 'low'];
+const VALID_PATTERNS: RecurrencePattern[] = ['daily', 'weekly', 'monthly', 'yearly'];
 
 // GET /api/todos — list all todos for the current user
 export async function GET() {
@@ -23,7 +24,7 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ error: 'Not authenticated' }, { status: 401 });
   }
 
-  let body: { title?: unknown; description?: unknown; due_date?: unknown; priority?: unknown };
+  let body: { title?: unknown; description?: unknown; due_date?: unknown; priority?: unknown; is_recurring?: unknown; recurrence_pattern?: unknown };
   try {
     body = await request.json();
   } catch {
@@ -75,6 +76,22 @@ export async function POST(request: NextRequest) {
     priority = body.priority as Priority;
   }
 
-  const todo = todoDB.create(session.userId, { title, description, due_date, priority });
+  // Validate recurrence
+  const is_recurring = body.is_recurring === true || body.is_recurring === 1;
+  let recurrence_pattern: RecurrencePattern | undefined;
+  if (is_recurring) {
+    if (!due_date) {
+      return NextResponse.json({ error: 'Recurring todos require a due date' }, { status: 400 });
+    }
+    if (
+      typeof body.recurrence_pattern !== 'string' ||
+      !VALID_PATTERNS.includes(body.recurrence_pattern as RecurrencePattern)
+    ) {
+      return NextResponse.json({ error: 'Invalid recurrence pattern' }, { status: 400 });
+    }
+    recurrence_pattern = body.recurrence_pattern as RecurrencePattern;
+  }
+
+  const todo = todoDB.create(session.userId, { title, description, due_date, priority, is_recurring, recurrence_pattern });
   return NextResponse.json(todo, { status: 201 });
 }
