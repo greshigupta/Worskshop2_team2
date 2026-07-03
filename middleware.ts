@@ -1,27 +1,36 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { getSession } from '@/lib/auth';
+import { jwtVerify } from 'jose';
 
-const PROTECTED_ROUTES = ['/', '/calendar'];
+const JWT_SECRET    = new TextEncoder().encode(
+  process.env.JWT_SECRET ?? 'dev-secret-change-in-production',
+);
+const PROTECTED     = ['/', '/calendar'];
 
 export async function middleware(request: NextRequest) {
   const { pathname } = request.nextUrl;
 
-  const isProtected = PROTECTED_ROUTES.some(
+  const isProtected = PROTECTED.some(
     (route) => pathname === route || pathname.startsWith(route + '/'),
   );
 
   if (!isProtected) return NextResponse.next();
 
-  const session = await getSession();
-  if (!session) {
+  const token = request.cookies.get('session')?.value;
+  if (!token) {
     const loginUrl = new URL('/login', request.url);
     loginUrl.searchParams.set('from', pathname);
     return NextResponse.redirect(loginUrl);
   }
 
-  return NextResponse.next();
+  try {
+    await jwtVerify(token, JWT_SECRET);
+    return NextResponse.next();
+  } catch {
+    const loginUrl = new URL('/login', request.url);
+    return NextResponse.redirect(loginUrl);
+  }
 }
 
 export const config = {
-  matcher: ['/((?!api|_next/static|_next/image|favicon.ico).*)'],
+  matcher: ['/', '/calendar', '/calendar/:path*'],
 };

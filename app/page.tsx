@@ -180,6 +180,7 @@ function formatDueDate(isoString: string): string {
 export default function HomePage() {
   const [todos, setTodos] = useState<Todo[]>([]);
   const [isAuthenticated, setIsAuthenticated] = useState(false);
+  const [currentUser, setCurrentUser] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
@@ -264,20 +265,19 @@ export default function HomePage() {
   }, [supported, permission]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // ---------------------------------------------------------------------------
-  // Auth bootstrap (dev-login for local development)
+  // Auth bootstrap
   // ---------------------------------------------------------------------------
 
   const bootstrap = useCallback(async () => {
-    // Try to get todos — if 401, do dev-login first
-    const res = await fetch('/api/todos');
-    if (res.status === 401) {
-      const loginRes = await fetch('/api/auth/dev-login', { method: 'POST' });
-      if (!loginRes.ok) {
-        setError('Authentication failed. Please set up WebAuthn login.');
-        setLoading(false);
-        return;
-      }
+    // Verify session via /api/auth/me
+    const meRes = await fetch('/api/auth/me');
+    if (!meRes.ok) {
+      // Middleware should redirect to /login, but in case it doesn't:
+      window.location.href = '/login';
+      return;
     }
+    const me = await meRes.json();
+    setCurrentUser(me.username);
     setIsAuthenticated(true);
     await Promise.all([fetchTodos(), fetchTags(), fetchTemplates()]);
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
@@ -285,6 +285,11 @@ export default function HomePage() {
   useEffect(() => {
     bootstrap();
   }, [bootstrap]);
+
+  async function handleLogout() {
+    await fetch('/api/auth/logout', { method: 'POST' });
+    window.location.href = '/login';
+  }
 
   // ---------------------------------------------------------------------------
   // Fetch todos
@@ -1067,12 +1072,23 @@ export default function HomePage() {
           <h1 className="text-2xl font-bold text-gray-800">My Todos</h1>
           <Link href="/calendar" className="text-sm text-blue-600 hover:underline">📅 Calendar</Link>
         </div>
-        <button
-          onClick={openCreateModal}
-          className="flex items-center gap-2 px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white text-sm font-medium rounded-lg transition-colors"
-        >
-          + New Todo
-        </button>
+        <div className="flex items-center gap-3">
+          {currentUser && (
+            <span className="text-xs text-gray-500 hidden sm:block">👤 {currentUser}</span>
+          )}
+          <button
+            onClick={handleLogout}
+            className="text-xs text-gray-500 hover:text-red-500 border border-gray-300 px-3 py-1.5 rounded-lg hover:border-red-300 transition-colors"
+          >
+            Logout
+          </button>
+          <button
+            onClick={openCreateModal}
+            className="flex items-center gap-2 px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white text-sm font-medium rounded-lg transition-colors"
+          >
+            + New Todo
+          </button>
+        </div>
       </div>
 
       {/* Search */}

@@ -93,6 +93,19 @@ db.exec(`
     date TEXT    NOT NULL UNIQUE,
     name TEXT    NOT NULL
   );
+
+  CREATE TABLE IF NOT EXISTS authenticators (
+    id                    INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id               INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    credential_id         TEXT    NOT NULL UNIQUE,
+    credential_public_key TEXT    NOT NULL,
+    counter               INTEGER NOT NULL DEFAULT 0,
+    transports            TEXT,
+    created_at            TEXT    NOT NULL
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_authenticators_user_id      ON authenticators(user_id);
+  CREATE INDEX IF NOT EXISTS idx_authenticators_credential_id ON authenticators(credential_id);
 `);
 
 // Migration: add priority column (safe to run multiple times)
@@ -559,7 +572,7 @@ export const todoDB = {
 };
 
 // ---------------------------------------------------------------------------
-// userDB — minimal user helpers (needed for session bootstrap in dev)
+// userDB — user management
 // ---------------------------------------------------------------------------
 
 export interface User {
@@ -578,20 +591,100 @@ const userStmts = {
   insert: db.prepare<[string, string]>(`
     INSERT OR IGNORE INTO users (username, created_at) VALUES (?, ?)
   `),
+  insertReturn: db.prepare<[string, string]>(`
+    INSERT INTO users (username, created_at) VALUES (?, ?)
+  `),
   selectByUsername: db.prepare<[string]>(`
     SELECT * FROM users WHERE username = ?
+  `),
+  selectById: db.prepare<[number]>(`
+    SELECT * FROM users WHERE id = ?
   `),
 };
 
 export const userDB = {
+  create(username: string): User {
+    const now = formatSingaporeDate(new Date());
+    const result = userStmts.insertReturn.run(username.trim(), now);
+    return userStmts.selectById.get(result.lastInsertRowid as number) as UserRow;
+  },
   findOrCreate(username: string): User {
     const now = formatSingaporeDate(new Date());
     userStmts.insert.run(username, now);
     return userStmts.selectByUsername.get(username) as UserRow;
   },
+  getByUsername(username: string): User | null {
+    const row = userStmts.selectByUsername.get(username) as UserRow | undefined;
+    return row ?? null;
+  },
   findByUsername(username: string): User | null {
     const row = userStmts.selectByUsername.get(username) as UserRow | undefined;
     return row ?? null;
+  },
+  getById(id: number): User | null {
+    const row = userStmts.selectById.get(id) as UserRow | undefined;
+    return row ?? null;
+  },
+};
+
+// ---------------------------------------------------------------------------
+// authenticatorDB — WebAuthn credential storage
+// ---------------------------------------------------------------------------
+
+export interface Authenticator {
+  id: number;
+  user_id: number;
+  credential_id: string;
+  credential_public_key: string;
+  counter: number;
+  transports: string | null;
+  created_at: string;
+}
+
+const authnStmts = {
+  insert: db.prepare<[number, string, string, number, string | null, string]>(`
+    INSERT INTO authenticators
+      (user_id, credential_id, credential_public_key, counter, transports, created_at)
+    VALUES (?, ?, ?, ?, ?, ?)
+  `),
+  selectByCredentialId: db.prepare<[string]>(`
+    SELECT * FROM authenticators WHERE credential_id = ?
+  `),
+  selectByUserId: db.prepare<[number]>(`
+    SELECT * FROM authenticators WHERE user_id = ?
+  `),
+  updateCounter: db.prepare<[number, number]>(`
+    UPDATE authenticators SET counter = ? WHERE id = ?
+  `),
+};
+
+export const authenticatorDB = {
+  create(userId: number, data: {
+    credential_id: string;
+    credential_public_key: string;
+    counter: number;
+    transports?: string;
+  }): Authenticator {
+    const now = formatSingaporeDate(new Date());
+    const result = authnStmts.insert.run(
+      userId,
+      data.credential_id,
+      data.credential_public_key,
+      data.counter ?? 0,
+      data.transports ?? null,
+      now,
+    );
+    return authnStmts.selectByCredentialId.get(data.credential_id) as Authenticator;
+    void result;
+  },
+  getByCredentialId(credentialId: string): Authenticator | null {
+    return (authnStmts.selectByCredentialId.get(credentialId) as Authenticator | undefined) ?? null;
+  },
+  getByUserId(userId: number): Authenticator[] {
+    return authnStmts.selectByUserId.all(userId) as Authenticator[];
+  },
+  updateCounter(id: number, counter: number): void {
+    authnStmts.updateCounter.run(counter, id);
   },
 };
 
