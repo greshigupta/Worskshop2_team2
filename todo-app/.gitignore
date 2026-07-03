@@ -1,0 +1,4 @@
+node_modules/
+.next/
+todos.db
+*.db-journal

@@ -1,225 +1,341 @@
-# PRP 02 — Priority System
+# PRP 02: Priority System
 
 ## Feature Overview
-Todos have a three-level priority: **High**, **Medium**, and **Low**. Priority is shown as a colour-coded badge on every todo. Todos are automatically sorted by priority (High → Medium → Low) within each display section. Users can filter the list to show only a specific priority level.
+
+A three-level priority system that allows users to categorize todos by urgency/importance. Priorities are visually distinguished with color-coded badges and automatically sort todos so the most important tasks appear first. Users can filter the todo list by a specific priority level.
+
+**Tech Stack:**
+- Framework: Next.js 16 (App Router)
+- Database: SQLite via `better-sqlite3`
+- Styling: Tailwind CSS 4
+- Testing: Playwright for E2E
 
 ---
 
 ## User Stories
-- As a user, I want to mark a todo as High priority so urgent tasks stand out visually.
-- As a user, I want todos sorted by priority so I always see the most important items first.
-- As a user, I want to filter by priority so I can focus on just High priority work.
+
+| ID | As a... | I want to... | So that... |
+|----|---------|--------------|------------|
+| US-01 | User | Assign a priority level when creating a todo | I can distinguish urgent from non-urgent tasks |
+| US-02 | User | See color-coded priority badges on todos | I can visually scan priority at a glance |
+| US-03 | User | Change a todo's priority via edit | I can reprioritize tasks as they evolve |
+| US-04 | User | Filter todos by a single priority level | I can focus on only high-priority items |
+| US-05 | User | Have todos auto-sorted by priority | High-priority tasks always appear first |
 
 ---
 
 ## User Flow
 
-### Setting Priority
-1. In the create or edit form, user sees a **Priority** dropdown: High / Medium (default) / Low
-2. Selection is saved with the todo
-3. Badge appears on the todo card
+### Setting Priority on Create
+1. User enters title in the create form
+2. From the **Priority** dropdown, selects: `High`, `Medium` (default), or `Low`
+3. Clicks **"Add"** — todo is created with selected priority
+4. New todo appears sorted appropriately in the Pending section
+
+### Changing Priority via Edit
+1. User clicks **"Edit"** on an existing todo
+2. Edit modal opens; priority dropdown shows current value
+3. User changes priority selection
+4. Clicks **"Update"**
+5. Todo re-sorts immediately in the list
 
 ### Filtering by Priority
-1. User selects a priority from the **Priority Filter** dropdown in the toolbar
-2. List immediately updates to show only matching todos
-3. A dismissible indicator shows the active filter
-4. Clearing the filter restores the full list
+1. User selects a priority from the **Priority Filter** dropdown (located above the todo list)
+2. Only todos matching that priority are shown (all sections: Overdue, Pending, Completed)
+3. Selecting **"All Priorities"** clears the filter
+4. Filter indicator is shown when active
 
 ---
 
 ## Technical Requirements
 
-### Database Change
-Add `priority` column to the `todos` table (migration-safe):
+### Database Schema
+
+The `priority` column is part of the `todos` table (defined in PRP 01):
 
 ```sql
--- In lib/db.ts db.exec() — wrap in try/catch
-ALTER TABLE todos ADD COLUMN priority TEXT NOT NULL DEFAULT 'medium';
+ALTER TABLE todos ADD COLUMN priority TEXT NOT NULL DEFAULT 'medium'
+  CHECK(priority IN ('high', 'medium', 'low'));
+
+CREATE INDEX idx_todos_priority ON todos(priority);
 ```
 
+No separate table is needed for priorities — they are an enum constraint.
+
+### TypeScript Types
+
 ```typescript
-// lib/db.ts
+// lib/types.ts
+
 export type Priority = 'high' | 'medium' | 'low';
-```
 
-Update `Todo` interface:
-```typescript
-export interface Todo {
-  // ... existing fields
-  priority: Priority;
-}
-```
+export const PRIORITIES: Priority[] = ['high', 'medium', 'low'];
 
-Update `CreateTodoInput` and `UpdateTodoInput`:
-```typescript
-export interface CreateTodoInput {
-  // ... existing fields
-  priority?: Priority;   // defaults to 'medium'
-}
-export interface UpdateTodoInput {
-  // ... existing fields
-  priority?: Priority;
-}
+export const PRIORITY_LABELS: Record<Priority, string> = {
+  high: 'High',
+  medium: 'Medium',
+  low: 'Low',
+};
+
+export const PRIORITY_ORDER: Record<Priority, number> = {
+  high: 1,
+  medium: 2,
+  low: 3,
+};
 ```
 
 ### API Changes
 
-**POST `/api/todos`** — accept optional `priority` in body, default to `'medium'`  
-**PUT `/api/todos/[id]`** — accept optional `priority` in body  
-**GET `/api/todos`** — no change; sorting done client-side
+Priority is validated in the `POST /api/todos` and `PUT /api/todos/[id]` endpoints:
 
-**Validation:**
 ```typescript
-const VALID_PRIORITIES: Priority[] = ['high', 'medium', 'low'];
-if (priority && !VALID_PRIORITIES.includes(priority)) {
-  return NextResponse.json({ error: 'Invalid priority' }, { status: 400 });
+// Validation helper
+function validatePriority(value: unknown): Priority {
+  if (!value || !['high', 'medium', 'low'].includes(value as string)) {
+    throw new Error('Invalid priority. Must be high, medium, or low.');
+  }
+  return value as Priority;
 }
+
+// In POST /api/todos
+const priority = (body.priority as Priority) || 'medium';
+validatePriority(priority);
 ```
 
----
-
-## Sorting Logic
-
-Within each section (Overdue / Active / Completed), todos are sorted:
-1. **Primary:** priority weight — `high = 0`, `medium = 1`, `low = 2`
-2. **Secondary:** `due_date` ascending (nulls last)
-3. **Tertiary:** `created_at` ascending
+### Sorting with Priority
 
 ```typescript
-const PRIORITY_WEIGHT: Record<Priority, number> = { high: 0, medium: 1, low: 2 };
-
-function sortTodos(todos: Todo[]): Todo[] {
+// Sorting is applied when fetching todos — highest priority first
+export function sortTodosByPriority(todos: Todo[]): Todo[] {
   return [...todos].sort((a, b) => {
-    const pw = PRIORITY_WEIGHT[a.priority] - PRIORITY_WEIGHT[b.priority];
-    if (pw !== 0) return pw;
-    if (a.due_date && b.due_date) return new Date(a.due_date).getTime() - new Date(b.due_date).getTime();
+    const pDiff = PRIORITY_ORDER[a.priority] - PRIORITY_ORDER[b.priority];
+    if (pDiff !== 0) return pDiff;
+    // Secondary: due date (earliest first, nulls last)
+    if (a.due_date && b.due_date) return a.due_date.localeCompare(b.due_date);
     if (a.due_date) return -1;
     if (b.due_date) return 1;
-    return new Date(a.created_at).getTime() - new Date(b.created_at).getTime();
+    return b.created_at.localeCompare(a.created_at);
   });
 }
 ```
 
 ---
 
-## UI Components (`app/page.tsx`)
+## UI Components
 
-### Priority Badge
+### PriorityBadge Component
+
 ```tsx
+// components/PriorityBadge.tsx
+
+interface PriorityBadgeProps {
+  priority: Priority;
+}
+
 const PRIORITY_STYLES: Record<Priority, string> = {
-  high:   'bg-red-100 text-red-800 dark:bg-red-900 dark:text-red-200',
+  high: 'bg-red-100 text-red-800 dark:bg-red-900 dark:text-red-200',
   medium: 'bg-yellow-100 text-yellow-800 dark:bg-yellow-900 dark:text-yellow-200',
-  low:    'bg-blue-100 text-blue-800 dark:bg-blue-900 dark:text-blue-200',
+  low: 'bg-blue-100 text-blue-800 dark:bg-blue-900 dark:text-blue-200',
 };
 
-function PriorityBadge({ priority }: { priority: Priority }) {
+export function PriorityBadge({ priority }: PriorityBadgeProps) {
   return (
-    <span className={`px-2 py-0.5 rounded-full text-xs font-medium ${PRIORITY_STYLES[priority]}`}>
-      {priority.charAt(0).toUpperCase() + priority.slice(1)}
+    <span
+      className={`inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium ${PRIORITY_STYLES[priority]}`}
+      data-testid={`priority-badge-${priority}`}
+    >
+      {PRIORITY_LABELS[priority]}
     </span>
   );
 }
 ```
 
-### Priority Dropdown (in forms)
+### PrioritySelect Component
+
+Used in both create and edit forms:
+
 ```tsx
-<select name="priority" defaultValue="medium">
-  <option value="high">🔴 High</option>
-  <option value="medium">🟡 Medium</option>
-  <option value="low">🔵 Low</option>
-</select>
+// components/PrioritySelect.tsx
+
+interface PrioritySelectProps {
+  value: Priority;
+  onChange: (p: Priority) => void;
+  id?: string;
+}
+
+export function PrioritySelect({ value, onChange, id = 'priority-select' }: PrioritySelectProps) {
+  return (
+    <select
+      id={id}
+      data-testid="priority-select"
+      value={value}
+      onChange={(e) => onChange(e.target.value as Priority)}
+      className="rounded border border-gray-300 px-2 py-1 text-sm dark:bg-gray-700 dark:border-gray-600"
+    >
+      <option value="high">High</option>
+      <option value="medium">Medium</option>
+      <option value="low">Low</option>
+    </select>
+  );
+}
 ```
 
-### Priority Filter (toolbar)
+### PriorityFilter Component
+
+Dropdown shown above the todo list:
+
 ```tsx
-<select
-  value={priorityFilter}
-  onChange={(e) => setPriorityFilter(e.target.value as Priority | 'all')}
->
-  <option value="all">All Priorities</option>
-  <option value="high">🔴 High</option>
-  <option value="medium">🟡 Medium</option>
-  <option value="low">🔵 Low</option>
-</select>
+// components/PriorityFilter.tsx
+
+interface PriorityFilterProps {
+  value: Priority | 'all';
+  onChange: (p: Priority | 'all') => void;
+}
+
+export function PriorityFilter({ value, onChange }: PriorityFilterProps) {
+  return (
+    <select
+      data-testid="priority-filter"
+      value={value}
+      onChange={(e) => onChange(e.target.value as Priority | 'all')}
+      className="rounded border px-2 py-1 text-sm"
+    >
+      <option value="all">All Priorities</option>
+      <option value="high">High Priority</option>
+      <option value="medium">Medium Priority</option>
+      <option value="low">Low Priority</option>
+    </select>
+  );
+}
 ```
 
-When a priority filter is active, show an indicator:
+### Integration in Main Page
+
 ```tsx
-{priorityFilter !== 'all' && (
-  <span className="filter-indicator">
-    Priority: {priorityFilter}
-    <button onClick={() => setPriorityFilter('all')}>✕</button>
-  </span>
-)}
+// app/page.tsx (relevant section)
+
+const [priorityFilter, setPriorityFilter] = useState<Priority | 'all'>('all');
+
+const filteredTodos = useMemo(() => {
+  let result = todos;
+  if (priorityFilter !== 'all') {
+    result = result.filter(t => t.priority === priorityFilter);
+  }
+  return sortTodosByPriority(result);
+}, [todos, priorityFilter]);
+
+// Sections derived from filteredTodos
+const overdue = filteredTodos.filter(t => !t.completed && t.due_date && isPastDue(t.due_date));
+const pending = filteredTodos.filter(t => !t.completed && !(t.due_date && isPastDue(t.due_date)));
+const completed = filteredTodos.filter(t => t.completed);
 ```
 
 ---
 
 ## Edge Cases
 
-| Scenario | Handling |
-|----------|----------|
-| Legacy todos without `priority` field | `DEFAULT 'medium'` in schema ensures they get medium |
-| Invalid priority value from API | Return `400` with validation error |
-| Priority filter + tag filter combined | Both active simultaneously (AND logic — PRP 08) |
-| Editing priority of completed todo | Allowed; re-sorts within Completed section |
-
----
-
-## Accessibility
-- Badge colours must meet WCAG AA contrast ratio (4.5:1 for text)
-- Priority dropdown labelled with `<label>` element
-- Filter dropdown labelled with `aria-label="Filter by priority"`
-- Colour is not the only indicator — text label always visible in badge
+| Scenario | Expected Behavior |
+|----------|------------------|
+| Priority not provided on create | Default to `'medium'` |
+| Invalid priority string in API | Return 400: `"Invalid priority"` |
+| Priority filter applied, no matching todos | Sections are empty; show "No todos match filter" state |
+| Editing priority from high to low | Todo re-sorts to appear lower in the list immediately |
+| Dark mode — badge colors | Use dark variants: `dark:bg-red-900`, etc. for contrast |
+| Priority badge in Overdue section | Badge still shows; Overdue styling co-exists with priority colors |
+| Accessibility — color alone | Badge text always present ("High", "Medium", "Low") alongside color |
 
 ---
 
 ## Acceptance Criteria
 
-- [ ] Three priority levels (High / Medium / Low) available in all forms
-- [ ] Default priority is Medium
-- [ ] Colour-coded badges display on all todo cards
-- [ ] Todos sorted High → Medium → Low within each section
-- [ ] Priority filter shows only matching todos
-- [ ] Active filter has a visible dismissible indicator
-- [ ] Editing priority updates the badge and re-sorts immediately
-- [ ] Dark mode badge colours are readable (WCAG AA)
+- [ ] Three priority levels: `high`, `medium`, `low`
+- [ ] Default priority is `medium` when not specified
+- [ ] High: red badge (`bg-red-100 text-red-800`)
+- [ ] Medium: yellow badge (`bg-yellow-100 text-yellow-800`)
+- [ ] Low: blue badge (`bg-blue-100 text-blue-800`)
+- [ ] Dark mode: badge colors adapt for readability
+- [ ] Todos auto-sort: high → medium → low within each section
+- [ ] Priority filter shows only matching todos across all sections
+- [ ] "All Priorities" filter shows all todos
+- [ ] Invalid priority value rejected by API with 400 status
+- [ ] Priority badge always shows text label (not color alone)
+- [ ] WCAG AA contrast ratio met for all badge colors in light and dark mode
 
 ---
 
 ## Testing Requirements
 
-### E2E Tests (`tests/03-priority.spec.ts`)
+### E2E Tests (Playwright)
+
 ```typescript
-test('create todo defaults to medium priority')
-test('create todo with high priority — red badge shown')
-test('create todo with low priority — blue badge shown')
-test('edit priority from medium to high — badge updates')
-test('filter by high priority — only high todos shown')
-test('filter by low priority — only low todos shown')
-test('clear priority filter — all todos restored')
-test('todos sorted high before medium before low')
-test('priority badges visible in dark mode')
+// tests/02-priority.spec.ts
+
+test('create todo with high priority', async ({ page }) => {
+  await page.fill('[data-testid="todo-input"]', 'Urgent task');
+  await page.selectOption('[data-testid="priority-select"]', 'high');
+  await page.click('[data-testid="add-button"]');
+  await expect(page.locator('[data-testid="priority-badge-high"]')).toBeVisible();
+});
+
+test('create todo with low priority', async ({ page }) => {
+  await page.fill('[data-testid="todo-input"]', 'Low priority task');
+  await page.selectOption('[data-testid="priority-select"]', 'low');
+  await page.click('[data-testid="add-button"]');
+  await expect(page.locator('[data-testid="priority-badge-low"]')).toBeVisible();
+});
+
+test('default priority is medium', async ({ page }) => {
+  await page.fill('[data-testid="todo-input"]', 'Default priority task');
+  await page.click('[data-testid="add-button"]');
+  await expect(page.locator('[data-testid="priority-badge-medium"]')).toBeVisible();
+});
+
+test('edit priority from medium to high', async ({ page }) => {
+  // Create medium priority todo first
+  await page.click('[data-testid="edit-button"]');
+  await page.selectOption('[data-testid="edit-priority-select"]', 'high');
+  await page.click('[data-testid="update-button"]');
+  await expect(page.locator('[data-testid="priority-badge-high"]')).toBeVisible();
+});
+
+test('filter by high priority shows only high todos', async ({ page }) => {
+  await page.selectOption('[data-testid="priority-filter"]', 'high');
+  const badges = page.locator('[data-testid^="priority-badge-"]');
+  const count = await badges.count();
+  for (let i = 0; i < count; i++) {
+    await expect(badges.nth(i)).toHaveAttribute('data-testid', 'priority-badge-high');
+  }
+});
+
+test('sorting: high priority appears before medium', async ({ page }) => {
+  // Create high and medium priority todos
+  const items = page.locator('[data-testid="todo-item"]');
+  const firstBadge = items.first().locator('[data-testid^="priority-badge-"]');
+  await expect(firstBadge).toHaveAttribute('data-testid', 'priority-badge-high');
+});
 ```
 
-### Unit Tests
-```typescript
-test('sortTodos: high priority before medium')
-test('sortTodos: medium priority before low')
-test('sortTodos: same priority sorted by due date')
-test('API: invalid priority value returns 400')
-test('API: missing priority defaults to medium')
-```
+### Visual Tests
+
+- Badge colors correct in light mode
+- Badge colors correct in dark mode
+- Contrast ratio passes WCAG AA (min 4.5:1 for normal text)
 
 ---
 
 ## Out of Scope
-- Priority icons/emojis beyond the text badge — add in later polish
-- Priority-based notifications — handled by PRP 04
+
+- More than three priority levels
+- Custom priority names or colors
+- Priority deadlines or automatic escalation
+- Priority statistics or analytics
+- Bulk priority change
 
 ---
 
 ## Success Metrics
-- Priority badge visible at a glance on all screen sizes
-- Sort order correct immediately after create/edit — no flicker
-- Filter response time < 100ms (client-side filtering)
+
+- Priority badge renders within the same render cycle as the todo item
+- Filter operation completes in < 50ms client-side
+- Sorting applied consistently across all three sections
+- Color contrast passes automated accessibility checks

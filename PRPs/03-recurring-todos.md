@@ -1,181 +1,271 @@
-# PRP 03 — Recurring Todos
+# PRP 03: Recurring Todos
 
 ## Feature Overview
-Todos can be set to recur on a schedule: **daily**, **weekly**, **monthly**, or **yearly**. When a recurring todo is marked complete, a new instance is automatically created with the next calculated due date. All metadata (priority, tags, reminder, recurrence pattern) is inherited by the new instance.
+
+Recurring todos automatically create the next instance of a task when the current one is completed. Supports four recurrence patterns: **daily**, **weekly**, **monthly**, and **yearly**. When a user marks a recurring todo as complete, the system calculates the next due date and creates a new todo with identical metadata.
+
+**Tech Stack:**
+- Framework: Next.js 16 (App Router)
+- Database: SQLite via `better-sqlite3` (synchronous)
+- Timezone: `Asia/Singapore` for all date calculations
+- Styling: Tailwind CSS 4
+- Testing: Playwright for E2E
 
 ---
 
 ## User Stories
-- As a user, I want to create a daily recurring todo so I don't have to recreate it each day.
-- As a user, I want completing a recurring todo to automatically create the next one.
-- As a user, I want the next instance to inherit the same settings so I don't lose configuration.
-- As a user, I want to stop a todo from recurring by unchecking "Repeat".
+
+| ID | As a... | I want to... | So that... |
+|----|---------|--------------|------------|
+| US-01 | User | Create a todo that repeats on a schedule | Recurring tasks are automatically recreated |
+| US-02 | User | Choose daily, weekly, monthly, or yearly recurrence | I can set the right schedule for each task |
+| US-03 | User | Complete a recurring todo and have the next one auto-created | I don't need to manually recreate repeating tasks |
+| US-04 | User | See a visual indicator that a todo is recurring | I can distinguish recurring from one-off tasks |
+| US-05 | User | Disable recurrence on an existing recurring todo | I can stop a recurring pattern when it's no longer needed |
+| US-06 | User | Have the next instance inherit the same settings | Priority, reminder, and tags carry over automatically |
 
 ---
 
 ## User Flow
 
 ### Creating a Recurring Todo
-1. In create/edit form, user checks **"Repeat"** checkbox
-2. A dropdown appears: Daily / Weekly / Monthly / Yearly
-3. **Due date becomes required** when recurring is enabled
-4. User sets due date — this becomes the first due date
-5. On save, todo is created with `is_recurring = true`
+1. User enters title in the create form
+2. **Checks the "Repeat" checkbox** — recurrence pattern dropdown appears
+3. Selects recurrence pattern: `Daily`, `Weekly`, `Monthly`, `Yearly`
+4. **Sets a due date** (required for recurring todos — dropdown is disabled without one)
+5. Clicks **"Add"**
+6. Todo created with a 🔄 badge showing the pattern (e.g., "🔄 weekly")
 
 ### Completing a Recurring Todo
-1. User checks the completion checkbox
-2. Current instance is marked complete and moves to Completed section
-3. A **new** todo is instantly created with:
-   - Same title, description, priority, tags, reminder, recurrence pattern
-   - Next due date calculated from the recurrence pattern
-   - `completed = false`
-4. New instance appears in Active section
+1. User checks the checkbox on a recurring todo
+2. Todo moves to **Completed** section
+3. System automatically creates a new todo in **Pending** with:
+   - Same title, priority, recurrence settings, reminder
+   - Due date calculated based on pattern from current due date
+   - Same tags (if any)
+4. New todo visible immediately in Pending section
 
 ### Disabling Recurrence
-1. User edits the todo and unchecks "Repeat"
-2. `is_recurring` set to `false`, `recurrence_pattern` set to `null`
-3. Completing the todo does NOT create a new instance
+1. User clicks **"Edit"** on a recurring todo
+2. Unchecks the **"Repeat"** checkbox
+3. Clicks **"Update"**
+4. Todo now behaves as a one-time todo; next completion will not create a new instance
 
 ---
 
 ## Technical Requirements
 
-### Database Changes
+### Database Schema
+
+Additional columns on the `todos` table:
 
 ```sql
--- Add to todos table (migration-safe ALTER TABLE in try/catch)
-ALTER TABLE todos ADD COLUMN is_recurring INTEGER NOT NULL DEFAULT 0;
-ALTER TABLE todos ADD COLUMN recurrence_pattern TEXT;
+-- These columns are part of the todos table (see PRP 01)
+-- is_recurring INTEGER NOT NULL DEFAULT 0
+-- recurrence_pattern TEXT CHECK(recurrence_pattern IN ('daily','weekly','monthly','yearly'))
+
+-- No additional table needed; recurrence is stored on the todo itself
 ```
 
+Validation rule: if `is_recurring = 1`, then `recurrence_pattern` must be set and `due_date` must not be null.
+
+### TypeScript Types
+
 ```typescript
-// lib/db.ts
+// lib/types.ts (additions)
+
 export type RecurrencePattern = 'daily' | 'weekly' | 'monthly' | 'yearly';
 
-// Update Todo interface
-export interface Todo {
-  // ... existing fields
-  is_recurring: boolean;
-  recurrence_pattern: RecurrencePattern | null;
-}
+export const RECURRENCE_PATTERNS: RecurrencePattern[] = ['daily', 'weekly', 'monthly', 'yearly'];
+
+export const RECURRENCE_LABELS: Record<RecurrencePattern, string> = {
+  daily: 'Daily',
+  weekly: 'Weekly',
+  monthly: 'Monthly',
+  yearly: 'Yearly',
+};
 ```
 
 ### Due Date Calculation Logic
 
-```typescript
-// lib/timezone.ts or lib/recurrence.ts
-import { getSingaporeNow } from '@/lib/timezone';
+The next due date is calculated from the **current due date** (not from today), preserving the original schedule:
 
+```typescript
+// lib/recurrence.ts
+
+import { addDays, addWeeks, addMonths, addYears } from 'date-fns';
+import { parseSingaporeDate, formatSingaporeDate } from './timezone';
+
+/**
+ * Calculate the next due date for a recurring todo.
+ * @param currentDueDateStr - ISO string of current due date (Singapore local time)
+ * @param pattern - Recurrence pattern
+ * @returns ISO string of next due date (Singapore local time)
+ */
 export function calculateNextDueDate(
-  currentDueDate: string,
+  currentDueDateStr: string,
   pattern: RecurrencePattern
 ): string {
-  const date = new Date(currentDueDate);
+  const current = parseSingaporeDate(currentDueDateStr);
 
+  let next: Date;
   switch (pattern) {
     case 'daily':
-      date.setDate(date.getDate() + 1);
+      next = addDays(current, 1);
       break;
     case 'weekly':
-      date.setDate(date.getDate() + 7);
+      next = addWeeks(current, 1);
       break;
     case 'monthly':
-      date.setMonth(date.getMonth() + 1);
+      next = addMonths(current, 1);
       break;
     case 'yearly':
-      date.setFullYear(date.getFullYear() + 1);
+      next = addYears(current, 1);
       break;
+    default:
+      throw new Error(`Unknown recurrence pattern: ${pattern}`);
   }
 
-  return date.toISOString();
+  return formatSingaporeDate(next);
 }
 ```
 
-**Edge case — monthly on 31st:** If next month has fewer days (e.g., Jan 31 → Feb 28/29), JavaScript's `setMonth` handles this automatically by rolling over to March. This is acceptable behaviour; document it in UI if needed.
+### API: Toggle Completion (with Recurrence Logic)
 
-### API Changes
+When `PUT /api/todos/[id]` is called with `{ completed: true }` and the todo is recurring:
 
-**POST `/api/todos`** — accept `is_recurring` and `recurrence_pattern`  
-**PUT `/api/todos/[id]`** — accept `is_recurring` and `recurrence_pattern`
-
-**Validation:**
 ```typescript
-const VALID_PATTERNS: RecurrencePattern[] = ['daily', 'weekly', 'monthly', 'yearly'];
+// app/api/todos/[id]/route.ts — PUT handler (relevant section)
+
+import { calculateNextDueDate } from '@/lib/recurrence';
+
+// After updating the todo as completed...
+if (completed && todo.is_recurring && todo.due_date && todo.recurrence_pattern) {
+  const nextDueDate = calculateNextDueDate(todo.due_date, todo.recurrence_pattern);
+
+  // Create the next instance with same metadata
+  const stmt = db.prepare(`
+    INSERT INTO todos (user_id, title, priority, is_recurring, recurrence_pattern, reminder_minutes, due_date, completed, created_at, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, 0, datetime('now'), datetime('now'))
+  `);
+  stmt.run(
+    todo.user_id,
+    todo.title,
+    todo.priority,
+    1,  // is_recurring
+    todo.recurrence_pattern,
+    todo.reminder_minutes,
+    nextDueDate
+  );
+
+  // Also copy tags to the new todo (via todo_tags table)
+  const newTodoId = db.prepare('SELECT last_insert_rowid() as id').get() as { id: number };
+  const tagRows = db.prepare('SELECT tag_id FROM todo_tags WHERE todo_id = ?').all(todo.id) as { tag_id: number }[];
+  const insertTag = db.prepare('INSERT INTO todo_tags (todo_id, tag_id) VALUES (?, ?)');
+  for (const { tag_id } of tagRows) {
+    insertTag.run(newTodoId.id, tag_id);
+  }
+}
+```
+
+### Validation
+
+```typescript
+// In POST /api/todos and PUT /api/todos/[id]
 
 if (is_recurring) {
   if (!due_date) {
-    return NextResponse.json({ error: 'Recurring todos require a due date' }, { status: 400 });
+    return Response.json({ error: 'Recurring todos require a due date' }, { status: 400 });
   }
-  if (!recurrence_pattern || !VALID_PATTERNS.includes(recurrence_pattern)) {
-    return NextResponse.json({ error: 'Invalid recurrence pattern' }, { status: 400 });
-  }
-}
-```
-
-### Completion Logic in PUT `/api/todos/[id]`
-
-When `completed` is set to `true` **and** `todo.is_recurring === true`:
-
-```typescript
-if (input.completed && todo.is_recurring && todo.recurrence_pattern && todo.due_date) {
-  const nextDueDate = calculateNextDueDate(todo.due_date, todo.recurrence_pattern);
-
-  // Fetch current tags for this todo
-  const currentTags = tagDB.getForTodo(userId, todo.id);
-
-  // Create the next instance
-  const nextTodo = todoDB.create(userId, {
-    title: todo.title,
-    description: todo.description,
-    priority: todo.priority,
-    due_date: nextDueDate,
-    is_recurring: true,
-    recurrence_pattern: todo.recurrence_pattern,
-    reminder_minutes: todo.reminder_minutes ?? null,  // inherited from PRP 04
-  });
-
-  // Re-associate tags
-  for (const tag of currentTags) {
-    tagDB.addToTodo(userId, nextTodo.id, tag.id);
+  if (!recurrence_pattern || !RECURRENCE_PATTERNS.includes(recurrence_pattern)) {
+    return Response.json({ error: 'Invalid or missing recurrence pattern' }, { status: 400 });
   }
 }
 ```
 
 ---
 
-## UI Components (`app/page.tsx`)
+## UI Components
 
-### Recurrence Toggle in Form
+### RecurrenceToggle Component
+
 ```tsx
-<label>
-  <input
-    type="checkbox"
-    checked={isRecurring}
-    onChange={(e) => setIsRecurring(e.target.checked)}
-  />
-  Repeat
-</label>
+// components/RecurrenceToggle.tsx
 
-{isRecurring && (
-  <select value={recurrencePattern} onChange={(e) => setRecurrencePattern(e.target.value)}>
-    <option value="daily">Daily</option>
-    <option value="weekly">Weekly</option>
-    <option value="monthly">Monthly</option>
-    <option value="yearly">Yearly</option>
-  </select>
-)}
+interface RecurrenceToggleProps {
+  isRecurring: boolean;
+  pattern: RecurrencePattern | null;
+  hasDueDate: boolean;
+  onToggle: (value: boolean) => void;
+  onPatternChange: (pattern: RecurrencePattern) => void;
+}
 
-{isRecurring && !dueDate && (
-  <p className="text-red-500 text-sm">Due date required for recurring todos</p>
-)}
+export function RecurrenceToggle({
+  isRecurring, pattern, hasDueDate, onToggle, onPatternChange
+}: RecurrenceToggleProps) {
+  return (
+    <div className="flex items-center gap-2">
+      <label className="flex items-center gap-1 text-sm">
+        <input
+          type="checkbox"
+          checked={isRecurring}
+          disabled={!hasDueDate}
+          onChange={(e) => onToggle(e.target.checked)}
+          data-testid="recurring-checkbox"
+        />
+        Repeat
+      </label>
+
+      {isRecurring && (
+        <select
+          value={pattern || 'weekly'}
+          onChange={(e) => onPatternChange(e.target.value as RecurrencePattern)}
+          data-testid="recurrence-pattern-select"
+          className="rounded border px-2 py-1 text-sm"
+        >
+          {RECURRENCE_PATTERNS.map(p => (
+            <option key={p} value={p}>{RECURRENCE_LABELS[p]}</option>
+          ))}
+        </select>
+      )}
+
+      {!hasDueDate && (
+        <span className="text-xs text-gray-500">Set a due date to enable recurrence</span>
+      )}
+    </div>
+  );
+}
 ```
 
-### Recurrence Badge on Todo Card
+### RecurringBadge Component
+
 ```tsx
-{todo.is_recurring && (
-  <span className="text-xs text-gray-500">
-    🔄 {todo.recurrence_pattern}
-  </span>
+// components/RecurringBadge.tsx
+
+interface RecurringBadgeProps {
+  pattern: RecurrencePattern;
+}
+
+export function RecurringBadge({ pattern }: RecurringBadgeProps) {
+  return (
+    <span
+      className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium
+                 bg-purple-100 text-purple-800 border border-purple-200
+                 dark:bg-purple-900 dark:text-purple-200 dark:border-purple-700"
+      data-testid="recurring-badge"
+    >
+      🔄 {pattern}
+    </span>
+  );
+}
+```
+
+### Integration in TodoItem
+
+```tsx
+// In TodoItem component, alongside PriorityBadge:
+{todo.is_recurring && todo.recurrence_pattern && (
+  <RecurringBadge pattern={todo.recurrence_pattern} />
 )}
 ```
 
@@ -183,65 +273,126 @@ if (input.completed && todo.is_recurring && todo.recurrence_pattern && todo.due_
 
 ## Edge Cases
 
-| Scenario | Handling |
-|----------|----------|
-| Recurring todo with no due date | Blocked at validation — due date required |
-| Pattern is `monthly` on the 31st | Rolls over correctly via JS Date behaviour |
-| User deletes a recurring todo | Only current instance deleted; no auto-creation |
-| User disables recurrence on a todo | Completes normally with no next instance |
-| Tags not yet implemented | Guard with `if (tagDB)` — tags added in PRP 06 |
-| Reminder not yet implemented | Guard with `todo.reminder_minutes ?? null` |
+| Scenario | Expected Behavior |
+|----------|------------------|
+| Recurring todo checked without due_date | Checkbox disabled; tooltip: "Set a due date to enable" |
+| Recurring todo without recurrence_pattern | API returns 400 |
+| Complete recurring todo — next due date falls on same day | New todo created with correct next-day/week/month date |
+| Monthly: due date is Jan 31 → next is Feb 28/29 | `date-fns addMonths` handles this correctly (last valid day) |
+| Yearly: Feb 29 (leap year) recurring yearly | Next year: `addYears` adjusts to Feb 28 in non-leap years |
+| Disable recurrence via edit | `is_recurring = false`, pattern cleared; completion no longer creates new todo |
+| Complete recurring todo that already has next instance | Should not create duplicates (check not implemented — avoid double-click) |
+| Tags on recurring todo | All tags copied to new instance via `todo_tags` |
+| Reminder on recurring todo | `reminder_minutes` copied; `last_notification_sent` reset to null on new instance |
 
 ---
 
 ## Acceptance Criteria
 
-- [ ] "Repeat" checkbox appears in create and edit forms
-- [ ] Recurrence pattern dropdown only shown when "Repeat" is checked
-- [ ] Due date marked required when recurring is enabled
-- [ ] Invalid pattern values rejected with `400`
-- [ ] 🔄 badge with pattern name shows on recurring todo cards
-- [ ] Completing a recurring todo creates a new instance immediately
-- [ ] New instance appears in Active section with correct next due date
-- [ ] New instance inherits: title, description, priority, recurrence pattern
-- [ ] Due date calculations correct for all four patterns
-- [ ] Can disable recurrence on an existing recurring todo
+- [ ] "Repeat" checkbox only enabled when a due date is set
+- [ ] When "Repeat" is checked, a pattern dropdown appears (default: weekly)
+- [ ] Four recurrence patterns available: daily, weekly, monthly, yearly
+- [ ] Recurring todos display a purple 🔄 badge with pattern name
+- [ ] On completion, a new todo is created with the next calculated due date
+- [ ] New todo inherits: title, priority, recurrence settings, reminder_minutes, tags
+- [ ] New todo has `completed = false` and fresh `created_at`
+- [ ] New todo has `last_notification_sent = null`
+- [ ] Can disable recurrence by unchecking "Repeat" in edit form
+- [ ] `calculateNextDueDate` handles month-end edge cases correctly
+- [ ] Recurring todo requires a `due_date` — API rejects without it
+- [ ] API rejects invalid recurrence pattern values
 
 ---
 
 ## Testing Requirements
 
-### E2E Tests (`tests/04-recurring.spec.ts`)
+### E2E Tests (Playwright)
+
 ```typescript
-test('create daily recurring todo — recurrence badge shown')
-test('create weekly recurring todo')
-test('create monthly recurring todo')
-test('create yearly recurring todo')
-test('recurring todo requires due date — validation error without it')
-test('complete daily recurring todo — new instance appears in active')
-test('new instance has due date +1 day from original')
-test('new instance inherits title and priority')
-test('disable recurrence — completing does not create new instance')
+// tests/03-recurring.spec.ts
+
+test('create daily recurring todo', async ({ page }) => {
+  await page.fill('[data-testid="todo-input"]', 'Daily standup');
+  await page.fill('[data-testid="due-date-input"]', '2099-12-01T09:00');
+  await page.check('[data-testid="recurring-checkbox"]');
+  await page.selectOption('[data-testid="recurrence-pattern-select"]', 'daily');
+  await page.click('[data-testid="add-button"]');
+  await expect(page.locator('[data-testid="recurring-badge"]')).toContainText('daily');
+});
+
+test('complete recurring todo creates next instance', async ({ page }) => {
+  // Create weekly recurring todo with due 2099-12-01T09:00
+  await page.click('[data-testid="todo-checkbox"]');
+  // Next instance should appear in Pending with due 2099-12-08T09:00
+  await expect(page.locator('[data-testid="pending-section"]')).toContainText('Daily standup');
+  await expect(page.locator('[data-testid="recurring-badge"]')).toBeVisible();
+});
+
+test('next instance inherits priority and reminder', async ({ page }) => {
+  // Create high-priority recurring todo with 1h reminder
+  await page.click('[data-testid="todo-checkbox"]');
+  // New instance should have same priority badge and reminder badge
+  await expect(page.locator('[data-testid="priority-badge-high"]')).toBeVisible();
+});
+
+test('recurring checkbox disabled without due date', async ({ page }) => {
+  await page.fill('[data-testid="todo-input"]', 'No due date todo');
+  await expect(page.locator('[data-testid="recurring-checkbox"]')).toBeDisabled();
+});
+
+test('disable recurrence on existing todo', async ({ page }) => {
+  await page.click('[data-testid="edit-button"]');
+  await page.uncheck('[data-testid="edit-recurring-checkbox"]');
+  await page.click('[data-testid="update-button"]');
+  await expect(page.locator('[data-testid="recurring-badge"]')).not.toBeVisible();
+  // Complete it — no new todo should be created
+  await page.click('[data-testid="todo-checkbox"]');
+  // Pending count should not increase
+});
 ```
 
 ### Unit Tests
+
 ```typescript
-test('calculateNextDueDate daily: adds 1 day')
-test('calculateNextDueDate weekly: adds 7 days')
-test('calculateNextDueDate monthly: adds 1 month')
-test('calculateNextDueDate yearly: adds 1 year')
-test('calculateNextDueDate monthly 31st: handles short months')
+// tests/unit/recurrence.test.ts
+
+test('daily: next due date is +1 day', () => {
+  const result = calculateNextDueDate('2025-11-01T09:00', 'daily');
+  expect(result).toBe('2025-11-02T09:00');
+});
+
+test('weekly: next due date is +7 days', () => {
+  const result = calculateNextDueDate('2025-11-01T09:00', 'weekly');
+  expect(result).toBe('2025-11-08T09:00');
+});
+
+test('monthly: Jan 31 → Feb 28 (non-leap year)', () => {
+  const result = calculateNextDueDate('2025-01-31T09:00', 'monthly');
+  expect(result).toBe('2025-02-28T09:00');
+});
+
+test('yearly: leap year Feb 29 → Feb 28 next year', () => {
+  const result = calculateNextDueDate('2024-02-29T09:00', 'yearly');
+  expect(result).toBe('2025-02-28T09:00');
+});
 ```
 
 ---
 
 ## Out of Scope
-- Custom recurrence intervals (e.g., every 3 days) — not required
-- End date for recurrence — not required
-- Editing all future instances — not required (edit current instance only)
+
+- Custom recurrence (e.g., "every 3 days", "every 2 weeks")
+- Recurrence end date or max occurrences
+- Pausing recurrence without disabling
+- Retroactive recurrence (catching up on missed instances)
+- Day-of-week selection for weekly (e.g., "every Monday")
+- "Skip next" functionality
 
 ---
 
 ## Success Metrics
-- Next instance appears within the same API response cycle as the completion (< 500ms total)
-- Due date calculations correct in Singapore timezone across DST boundaries
+
+- New recurring instance created within the same API response time (< 300ms total)
+- Date calculations accurate across all timezones on the server
+- No duplicate instances created from double-clicks (UX debounce)
+- Monthly/yearly edge cases pass automated unit tests
